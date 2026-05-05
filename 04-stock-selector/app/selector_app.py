@@ -7,8 +7,6 @@
 
 import os
 import sys
-import hashlib
-from functools import wraps
 from datetime import datetime
 
 # ── 路径注入（使 data/ selectors/ utils/ 均可直接 import）─────────────────
@@ -18,66 +16,187 @@ for _sub in ('data', 'selectors', 'utils'):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from flask import Flask, render_template, jsonify, request, redirect, url_for
-from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from flask import Flask, render_template, jsonify, request
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False
-app.config['SECRET_KEY'] = 'selector-secret-key-change-in-production'
-
-# ── 登录 ────────────────────────────────────────────────────────────────────
-login_manager = LoginManager()
-login_manager.init_app(app)
-login_manager.login_view = 'login'
-
-USERS = {
-    'admin': {'password': hashlib.sha256('admin123'.encode()).hexdigest(), 'id': 1},
-}
-
-class User(UserMixin):
-    def __init__(self, uid, username):
-        self.id = uid
-        self.username = username
-
-@login_manager.user_loader
-def load_user(user_id):
-    for username, data in USERS.items():
-        if data['id'] == int(user_id):
-            return User(user_id, username)
-    return None
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if current_user.is_authenticated:
-        return redirect(url_for('index'))
-    if request.method == 'POST':
-        username = request.form.get('username', '')
-        password = request.form.get('password', '')
-        if username in USERS:
-            if hashlib.sha256(password.encode()).hexdigest() == USERS[username]['password']:
-                login_user(User(USERS[username]['id'], username), remember=True)
-                return redirect(request.args.get('next') or url_for('index'))
-        return render_template('login.html', error='用户名或密码错误')
-    return render_template('login.html')
-
-@app.route('/logout')
-@login_required
-def logout():
-    logout_user()
-    return redirect(url_for('login'))
 
 from config import WEB_HOST, WEB_PORT
 
+# ── 工具函数 ─────────────────────────────────────────────────────────────────
+
+def _compute_indicators(df) -> dict:
+    """从历史K线 DataFrame 计算 MA/RSI/MACD/KDJ/BOLL/ATR，缺数据的字段不写入。"""
+    import numpy as np
+    result = {}
+    try:
+        close = df['close'].astype(float).values
+        high  = df['high'].astype(float).values
+        low   = df['low'].astype(float).values
+        n = len(close)
+
+        def _ema_series(arr, period):
+            k = 2.0 / (period + 1)
+            out = np.empty(len(arr))
+            out[0] = arr[0]
+            for i in range(1, len(arr)):
+                out[i] = arr[i] * k + out[i - 1] * (1 - k)
+            return out
+
+        # MA
+        for p, name in [(5, 'ma5'), (10, 'ma10'), (20, 'ma20'), (60, 'ma60')]:
+            if n >= p:
+                result[name] = round(float(np.mean(close[-p:])), 3)
+
+        # RSI(14) — simple average seed
+        if n >= 15:
+            delta  = np.diff(close)
+            up_arr = np.where(delta > 0, delta, 0.0)
+            dn_arr = np.where(delta < 0, -delta, 0.0)
+            avg_up = float(np.mean(up_arr[-14:]))
+            avg_dn = float(np.mean(dn_arr[-14:]))
+            rsi = 100.0 - 100.0 / (1 + avg_up / avg_dn) if avg_dn > 0 else 100.0
+            result['rsi'] = round(rsi, 2)
+
+        # MACD(12,26,9)
+        if n >= 35:
+            ema12      = _ema_series(close, 12)
+            ema26      = _ema_series(close, 26)
+            dif_series = ema12 - ema26
+            dea_series = _ema_series(dif_series, 9)
+            result['dif']  = round(float(dif_series[-1]), 4)
+            result['dea']  = round(float(dea_series[-1]), 4)
+            result['macd'] = round(float((dif_series[-1] - dea_series[-1]) * 2), 4)
+
+        # KDJ(9,3,3)
+        if n >= 9:
+            k_val, d_val = 50.0, 50.0
+            window = min(n, 60)
+            h_w, l_w, c_w = high[-window:], low[-window:], close[-window:]
+            for i in range(len(c_w) - 9 + 1):
+                h9  = float(np.max(h_w[i:i + 9]))
+                l9  = float(np.min(l_w[i:i + 9]))
+                rsv = (c_w[i + 8] - l9) / (h9 - l9) * 100 if (h9 - l9) > 0 else 50.0
+                k_val = rsv / 3 + k_val * 2 / 3
+                d_val = k_val / 3 + d_val * 2 / 3
+            j_val = 3 * k_val - 2 * d_val
+            result.update({
+                'kdj_k': round(k_val, 2),
+                'kdj_d': round(d_val, 2),
+                'kdj_j': round(j_val, 2),
+            })
+
+        # BOLL(20, 2σ)
+        if n >= 20:
+            mid = float(np.mean(close[-20:]))
+            std = float(np.std(close[-20:], ddof=1))
+            result['boll_mid']   = round(mid, 3)
+            result['boll_upper'] = round(mid + 2 * std, 3)
+            result['boll_lower'] = round(mid - 2 * std, 3)
+
+        # ATR(14)
+        if n >= 15:
+            tr_arr = [
+                max(high[i] - low[i],
+                    abs(high[i] - close[i - 1]),
+                    abs(low[i]  - close[i - 1]))
+                for i in range(-14, 0)
+            ]
+            result['atr'] = round(float(np.mean(tr_arr)), 3)
+
+    except Exception as _e:
+        print(f'⚠️ _compute_indicators 失败: {_e}', flush=True)
+
+    return result
+
+
+def _fetch_eastmoney_fund_flow(code: str) -> dict:
+    """东方财富实时资金流向明细（超大/大/中/小单净流入 + 主力净占比）。
+    字段说明（push2 fflow/get）：
+      f62  主力净流入（元）   f184 主力净流入占比（%）
+      f66  超大单净流入（元） f69  超大单净流入占比
+      f72  大单净流入（元）   f75  大单净流入占比
+      f78  中单净流入（元）   f81  中单净流入占比
+      f84  小单净流入（元）   f87  小单净流入占比
+    """
+    import urllib.request, urllib.parse, json as _json
+    secid  = '1.' + code if code.startswith('6') else '0.' + code
+    fields = 'f62,f184,f66,f69,f72,f75,f78,f81,f84,f87'
+    url = ('https://push2.eastmoney.com/api/qt/stock/fflow/get?'
+           + urllib.parse.urlencode({'secid': secid, 'fields': fields}))
+    req = urllib.request.Request(
+        url, headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://quote.eastmoney.com/'}
+    )
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        obj = _json.loads(resp.read().decode('utf-8', 'ignore'))
+    d = obj.get('data') or {}
+    mapping = {
+        'f62':  'main_net_inflow',      # 主力净流入（元）
+        'f184': 'main_net_inflow_pct',  # 主力净流入占比（%）
+        'f66':  'super_large_net',      # 超大单净流入（元）
+        'f72':  'large_net',            # 大单净流入（元）
+        'f78':  'medium_net',           # 中单净流入（元）
+        'f84':  'small_net',            # 小单净流入（元）
+    }
+    result = {v: float(d[k]) for k, v in mapping.items() if d.get(k) is not None}
+    # main_ratio 是 main_net_inflow_pct 的别名，LLM prompt 中两者均引用
+    if 'main_net_inflow_pct' in result:
+        result['main_ratio'] = result['main_net_inflow_pct']
+    return result
+
+
+def _fetch_eastmoney_days_continuous(code: str):
+    """从东方财富历史资金流向K线计算主力连续净流入/流出天数。
+    返回：正整数=连续净流入N天；负整数=连续净流出N天；None=获取失败。
+    """
+    import urllib.request, urllib.parse, json as _json
+    secid = '1.' + code if code.startswith('6') else '0.' + code
+    url = ('https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get?'
+           + urllib.parse.urlencode({
+               'lmt': '0', 'klt': '101',
+               'fields1': 'f1,f2,f3,f7',
+               'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63',
+               'secid': secid,
+           }))
+    req = urllib.request.Request(
+        url, headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://quote.eastmoney.com/'}
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        obj = _json.loads(resp.read().decode('utf-8', 'ignore'))
+    klines = (obj.get('data') or {}).get('klines') or []
+    if not klines:
+        return None
+    # kline 格式: "date,main_net,main_pct,super_large_net,..."（fields2 顺序）
+    # f52 对应 index=1（主力净流入元）
+    main_flows = []
+    for kl in klines[-10:]:
+        parts = kl.split(',')
+        if len(parts) > 1:
+            try:
+                main_flows.append(float(parts[1]))
+            except (ValueError, IndexError):
+                pass
+    if not main_flows:
+        return None
+    # 从最近一天向前统计同向天数
+    positive = main_flows[-1] >= 0
+    count = 0
+    for v in reversed(main_flows):
+        if (v >= 0) == positive:
+            count += 1
+        else:
+            break
+    return count if positive else -count
+
+
 # ── 页面路由 ────────────────────────────────────────────────────────────────
 @app.route('/')
-@login_required
 def index():
-    return render_template('index.html', username=current_user.username)
+    return render_template('index.html')
 
 
 # ── 选股 API ─────────────────────────────────────────────────────────────────
 @app.route('/api/selector/run', methods=['POST'])
-@login_required
 def api_run_selector():
     """
     运行选股器
@@ -115,7 +234,6 @@ def api_run_selector():
 
 
 @app.route('/api/selector/report', methods=['POST'])
-@login_required
 def api_get_selector_report():
     """
     生成选股文字报告
@@ -150,7 +268,6 @@ def api_get_selector_report():
 
 # ── GPT 深度分析 API ──────────────────────────────────────────────────────────
 @app.route('/api/selector/gpt-analyze', methods=['POST'])
-@login_required
 def api_gpt_analyze():
     """
     对选股结果调用 GPT-4.1 生成深度研报
@@ -188,36 +305,180 @@ def api_gpt_analyze():
     codes = [s['code'] for s in stocks]
     stocks_data = []
     for s in stocks:
-        det = s.get('details') or {}
-        ff  = det.get('fund_flow') or {}
-        trade = det.get('trade_points') or {}
+        det    = s.get('details') or {}
+        ff     = det.get('fund_flow') or {}
+        trade  = det.get('trade_points') or {}
+
+        # 各选股器将不同指标存入 details 的不同子键
+        trend_info  = det.get('trend') or {}       # long_term / enhanced
+        rsi_info    = det.get('rsi') or {}          # short_term
+        kdj_info    = det.get('kdj') or {}          # short_term
+        macd_info   = det.get('macd') or {}         # short_term
+        boll_info   = det.get('bollinger') or {}    # short_term
+        vol_info    = det.get('volume') or {}       # both
+        strength    = det.get('strength') or {}     # long_term / enhanced
+
+        # 根据 details 内容区分短线/中长线评分来源
+        is_short = 'rsi' in det    # short_term_selector 特征键
+        is_long  = 'trend' in det  # long_term_selector 特征键
+
         entry = {
-            'code':       s.get('code'),
-            'name':       s.get('name'),
-            'price':      s.get('price'),
-            'change_pct': s.get('change_pct'),
+            'code':         s.get('code'),
+            'name':         s.get('name'),
+            'price':        s.get('price'),
+            'change_pct':   s.get('change_pct'),
+            'volume_ratio': vol_info.get('volume_ratio'),
             'tech_indicators': {
-                'ma20':        (det.get('trend') or {}).get('ma20'),
-                'ma60':        (det.get('trend') or {}).get('ma60'),
-                'short_score': s.get('score'),
-                'long_score':  s.get('score'),
-                'adx':         (det.get('strength') or {}).get('adx'),
-                'atr':         trade.get('atr'),
+                # 均线 —— long_term 在 trend 里；short_term 暂无，后面缓存补充
+                'ma20':       trend_info.get('ma20'),
+                'ma60':       trend_info.get('ma60'),
+                # 短线指标 —— short_term_selector 已计算
+                'rsi':        rsi_info.get('value'),
+                'macd':       macd_info.get('macd_hist'),   # MACD 柱
+                'dif':        macd_info.get('dif'),
+                'dea':        macd_info.get('dea'),
+                'kdj_k':      kdj_info.get('k'),
+                'kdj_d':      kdj_info.get('d'),
+                'kdj_j':      kdj_info.get('j'),
+                'boll_upper': boll_info.get('upper'),
+                'boll_mid':   boll_info.get('middle'),
+                'boll_lower': boll_info.get('lower'),
+                # 趋势强度
+                'adx':        strength.get('adx'),
+                'atr':        trade.get('atr'),
+                # 量化评分：短线/中长线分开标注
+                'short_score': s.get('score') if is_short else None,
+                'long_score':  s.get('score') if is_long  else None,
             },
             'fund_flow': {
-                'main_net_inflow': ff.get('main_in'),
+                # main_in 在 selector 内部单位已是"万元"，还原为元传给 LLM
+                'main_net_inflow': (
+                    ff.get('main_in') * 10000
+                    if ff.get('main_in') is not None else None
+                ),
+                'main_ratio': ff.get('main_ratio'),
             },
             # 选股专属字段
-            'selector_score':       s.get('score'),
-            'selector_rating':      s.get('rating'),
-            'buy_signals':          s.get('buy_signals', []),
-            'stop_loss':            s.get('stop_loss'),
-            'take_profit':          s.get('take_profit'),
-            'stop_loss_pct':        s.get('stop_loss_pct'),
-            'take_profit_pct':      s.get('take_profit_pct'),
-            'risk_reward_ratio':    s.get('risk_reward_ratio'),
+            'selector_score':    s.get('score'),
+            'selector_rating':   s.get('rating'),
+            'buy_signals':       s.get('buy_signals', []),
+            'stop_loss':         s.get('stop_loss'),
+            'take_profit':       s.get('take_profit'),
+            'stop_loss_pct':     s.get('stop_loss_pct'),
+            'take_profit_pct':   s.get('take_profit_pct'),
+            'risk_reward_ratio': s.get('risk_reward_ratio'),
         }
         stocks_data.append(entry)
+
+    # ── 补充数据（行情/技术指标/资金流向/基本面）────────────────────────────
+    try:
+        import sys as _sys, os as _os
+        _data_dir = _os.path.join(_ROOT, 'data')
+        if _data_dir not in _sys.path:
+            _sys.path.insert(0, _data_dir)
+        from stock_cache_db import StockCache as _SC
+        _sc = _SC()
+
+        # ① 东方财富批量行情 → pe_ttm / market_cap / volume_ratio / turnover
+        _em_batch = {}
+        try:
+            from eastmoney_api import EastMoneyAPI as _EMAPI
+            _em_rows = _EMAPI(timeout=8).get_batch(codes)
+            _em_batch = {r['code']: r for r in _em_rows}
+            print(f'[补充] EastMoney批量行情成功，获取 {len(_em_batch)} 条', flush=True)
+        except Exception as _e:
+            print(f'⚠️ EastMoney批量行情失败: {_e}', flush=True)
+
+        for entry in stocks_data:
+            _code = entry['code']
+            _em   = _em_batch.get(_code) or {}
+
+            # 行情字段补充（volume / turnover / change_amount）
+            _si = _sc.get_stock(_code)
+            if _si:
+                if entry.get('volume') is None:
+                    entry['volume'] = _si.get('volume')
+                if entry.get('turnover') is None:
+                    entry['turnover'] = _si.get('amount')
+            # 覆盖/补充东财实时字段
+            if _em:
+                # pe_ttm：只接受 > 0 的有效值，避免用 0 覆盖
+                _pe = _em.get('pe_ratio')
+                if _pe and float(_pe) > 0:
+                    entry['pe_ttm'] = round(float(_pe), 2)
+                if entry.get('market_cap') is None and _em.get('market_cap'):
+                    entry['market_cap'] = _em['market_cap']
+                if entry.get('volume_ratio') is None and _em.get('volume_ratio'):
+                    entry['volume_ratio'] = _em['volume_ratio']
+                if entry.get('turnover') is None and _em.get('turnover'):
+                    entry['turnover'] = _em['turnover']
+                if entry.get('change_amount') is None and _em.get('change_amount'):
+                    entry['change_amount'] = _em['change_amount']
+
+            # ② 技术指标补充：先从缓存，再从K线实时计算
+            _ALL_TI = ('ma5', 'ma10', 'ma20', 'ma60', 'rsi',
+                       'dif', 'dea', 'macd',
+                       'kdj_k', 'kdj_d', 'kdj_j',
+                       'boll_upper', 'boll_mid', 'boll_lower', 'atr')
+            ti = entry.setdefault('tech_indicators', {})
+
+            # 2a) 从缓存补（MA5/10/20/RSI/MACD/DIF/DEA）
+            _ti_cache = _sc.get_tech_indicators(_code)
+            if _ti_cache:
+                for _k in ('ma5', 'ma10', 'ma20', 'rsi', 'macd', 'dif', 'dea'):
+                    if ti.get(_k) is None and _ti_cache.get(_k) is not None:
+                        ti[_k] = _ti_cache[_k]
+
+            # 2b) 仍有缺失 → 从历史K线实时计算全部指标
+            if any(ti.get(_k) is None for _k in _ALL_TI):
+                try:
+                    from hybrid_data_source import get_hybrid_source as _ghs
+                    _df = _ghs().get_history_data(_code, days=120)
+                    if _df is not None and len(_df) >= 20:
+                        _calc = _compute_indicators(_df)
+                        for _k, _v in _calc.items():
+                            if ti.get(_k) is None and _v is not None:
+                                ti[_k] = _v
+                        print(f'[补充] {_code} K线计算指标完成: {list(_calc.keys())}', flush=True)
+                except Exception as _e:
+                    print(f'⚠️ {_code} K线指标计算失败: {_e}', flush=True)
+
+            # ③ 基本面 PE：仅在东财未提供有效值时从缓存读取
+            if not (entry.get('pe_ttm') and float(entry['pe_ttm']) > 0):
+                try:
+                    _cur = _sc.conn.cursor()
+                    _cur.execute('SELECT pe FROM fundamental WHERE code=?', (_code,))
+                    _row = _cur.fetchone()
+                    if _row and _row[0] and float(_row[0]) > 0:
+                        entry['pe_ttm'] = round(float(_row[0]), 2)
+                except Exception:
+                    pass
+
+            # ④ 资金流向明细（超大/大/中/小单净流入 + 主力净占比 + 连续天数）
+            _ff = entry.setdefault('fund_flow', {})
+            try:
+                _ff_live = _fetch_eastmoney_fund_flow(_code)
+                for _k, _v in _ff_live.items():
+                    # live 数据始终覆盖（修正 main_in=0 的假零问题）
+                    _ff[_k] = _v
+                print(f'[补充] {_code} 资金流向: 主力净={_ff_live.get("main_net_inflow", "N/A")} '
+                      f'超大={_ff_live.get("super_large_net", "N/A")} '
+                      f'大={_ff_live.get("large_net", "N/A")}', flush=True)
+            except Exception as _e:
+                print(f'⚠️ {_code} 资金流向获取失败: {_e}', flush=True)
+
+            # 连续净流入/流出天数
+            try:
+                _days = _fetch_eastmoney_days_continuous(_code)
+                if _days is not None:
+                    _ff['days_continuous'] = _days
+                    print(f'[补充] {_code} 连续资金方向: {_days} 天', flush=True)
+            except Exception as _e:
+                print(f'⚠️ {_code} 连续天数获取失败: {_e}', flush=True)
+
+        _sc.close()
+    except Exception as _e:
+        print(f'⚠️ 补充数据失败: {_e}', flush=True)
 
     sentiment = {
         'score': None,
@@ -228,14 +489,21 @@ def api_gpt_analyze():
     use_stream = bool(data.get('stream', False))
 
     try:
-        from gpt_analyst import run_analysis
+        from llm_analyst import run_single_analysis
         if use_stream:
             def generate():
-                for chunk in run_analysis(codes, sentiment, stocks_data, stream=True):
-                    yield chunk
+                for entry in stocks_data:
+                    yield from run_single_analysis(
+                        entry['code'], sentiment, entry, stream=True
+                    )
             return Response(stream_with_context(generate()), content_type='text/plain; charset=utf-8')
         else:
-            report = run_analysis(codes, sentiment, stocks_data, stream=False)
+            reports = []
+            for entry in stocks_data:
+                reports.append(
+                    run_single_analysis(entry['code'], sentiment, entry, stream=False)
+                )
+            report = '\n\n---\n\n'.join(reports)
             return jsonify({'status': 'success', 'report': report})
     except Exception as e:
         import traceback
@@ -245,7 +513,6 @@ def api_gpt_analyze():
 
 # ── 市场情绪 API ────────────────────────────────────────────────────────────
 @app.route('/api/market/sentiment', methods=['GET'])
-@login_required
 def api_market_sentiment():
     """
     7维市场情绪评分。
@@ -332,7 +599,6 @@ def api_market_sentiment():
 
 # ── 龙虎榜 API ──────────────────────────────────────────────────────────────
 @app.route('/api/lhb/top', methods=['GET'])
-@login_required
 def api_lhb_top():
     """返回龙虎榜净买入 top-10 及情绪分析，先读缓存；无缓存则实时拉取并写入。"""
     try:
@@ -367,8 +633,6 @@ if __name__ == '__main__':
 ║                                                      ║
 ║   本机访问:   http://localhost:{WEB_PORT}                ║
 ║   远程访问:   http://{_local_ip}:{WEB_PORT}          ║
-║                                                      ║
-║   默认账号:   admin / admin123                        ║
 ╚══════════════════════════════════════════════════════╝
 """)
-    app.run(host=WEB_HOST, port=WEB_PORT, debug=True)
+    app.run(host=WEB_HOST, port=WEB_PORT, debug=True, use_reloader=False)

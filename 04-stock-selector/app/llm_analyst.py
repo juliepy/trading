@@ -21,9 +21,8 @@ LLM 深度分析模块 — 支持 GPT-4.1（Responses API）和 DeepSeek（Chat 
 import datetime as dt
 import json
 import os
-import sys
 from pathlib import Path
-from typing import Generator, List, Optional
+from typing import Generator, Union
 
 # ── 自动加载 .env ─────────────────────────────────────────────────────────
 _env_path = Path(__file__).resolve().parents[1] / ".env"
@@ -37,273 +36,253 @@ if _env_path.exists():
             os.environ.setdefault(_k.strip(), _v.strip())
 
 # ── 配置 ──────────────────────────────────────────────────────────────────
-# 统一模型配置：在 .env 中设置 LLM_MODEL 即可切换后端
-_LLM_MODEL = os.environ.get("LLM_MODEL", "")
-
-# GPT
-_BASE_URL  = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-_API_KEY   = os.environ.get("CI_TOKEN") or os.environ.get("OPENAI_API_KEY", "")
-_GPT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1")
-_APP_NAME  = "a-stock-selector"
-
-# DeepSeek
+_BASE_URL    = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+_API_KEY     = os.environ.get("CI_TOKEN") or os.environ.get("OPENAI_API_KEY", "")
+_GPT_MODEL   = os.environ.get("OPENAI_MODEL", "gpt-4.1")
+_APP_NAME    = "a-stock-selector"
 _DS_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
 _DS_API_KEY  = os.environ.get("DEEPSEEK_API_KEY", "")
 _DS_MODEL    = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 
+# ── 后端 & 模型（模块加载时解析一次）─────────────────────────────────────
+def _resolve_backend() -> tuple[str, str]:
+    """优先级：LLM_MODEL > DEEPSEEK_API_KEY 存在 > 默认 GPT"""
+    m = os.environ.get("LLM_MODEL", "").strip()
+    if m.lower().startswith("deepseek"):
+        return "deepseek", m
+    if m:
+        return "gpt", m
+    return ("deepseek", _DS_MODEL) if _DS_API_KEY else ("gpt", _GPT_MODEL)
+
+_BACKEND, _MODEL = _resolve_backend()
+
+# ── 客户端懒加载单例 ──────────────────────────────────────────────────────
+_gpt_client = None
+_ds_client  = None
+
+
+def _get_gpt_client():
+    global _gpt_client
+    if _gpt_client is None:
+        if not _API_KEY:
+            raise RuntimeError("未设置 CI_TOKEN 或 OPENAI_API_KEY，无法调用 GPT。")
+        from openai import OpenAI
+        _gpt_client = OpenAI(
+            base_url=_BASE_URL,
+            api_key=_API_KEY,
+            default_headers={"x-cisco-app": _APP_NAME},
+        )
+    return _gpt_client
+
+
+def _get_deepseek_client():
+    global _ds_client
+    if _ds_client is None:
+        if not _DS_API_KEY:
+            raise RuntimeError("未设置 DEEPSEEK_API_KEY，无法调用 DeepSeek。")
+        from openai import OpenAI
+        _ds_client = OpenAI(base_url=_DS_BASE_URL, api_key=_DS_API_KEY)
+    return _ds_client
+
+
 # ── System Prompt ─────────────────────────────────────────────────────────
 _SYSTEM_PROMPT = """\
 你是一位专业的A股分析师，遵循严格的"证据优先、过程透明"分析原则。
+本次任务为**单只股票深度研报**。
+请严格根据用户提供的结构化数据进行分析，所有结论必须有数据依据，不得捏造或假设任何未在数据中出现的数字。
 
 ## 核心原则
-1. **证据绑定**：每个关键结论必须附有来源/数据依据，禁止无依据主观猜测。
-2. **双逻辑分离**：所有股票判断必须拆分为 产业逻辑 + 交易逻辑 两层。
-3. **三情景输出**：每只股票给出 强/中/弱 三个价格情景及对应操作动作。
+1. **证据绑定**：每个关键结论必须引用传入数据中的具体字段值，禁止无依据的主观猜测。
+2. **双逻辑分离**：判断必须拆分为 交易逻辑（技术+资金） + 选股逻辑（评分+信号） 两层。
+3. **三情景输出**：给出 强/中/弱 三个价格情景及对应操作动作，触发条件须为具体价位或指标值。
 4. **不确定性标注**：置信度低于"中"时，必须明确写出不确定因素与修正计划。
 
-## 分析报告必须包含以下结构（按顺序）
+## 报告结构（按顺序输出）
 
-### 0) 数据摘要（Data Summary）
-- 展示从调用方提供的结构化数据中读取到的关键指标。
-- 时间戳，代码列表，市场情绪评分与状态。
-- 各股票核心行情数据（价格、涨跌、量比、PE）、技术指标（MA/RSI/MACD/KDJ）、资金流向。
+### 0) 数据摘要
+- 时间戳、股票代码与名称、市场情绪评分。
+- 核心行情数据（价格、涨跌幅、量比、PE、市值）。
+- 技术指标一览（MA5/10/20/60、RSI、MACD、KDJ、BOLL、ATR）。
+- 资金流向（主力净流入、超大单/大单占比、连续净流入天数）。
+- 选股器评分（若数据中包含 selector_score / selector_rating / buy_signals，在此列出并解读含义）。
 
 ### 1) 市场情绪底色
-- 综合情绪评分解读（恐慌/谨慎/中性/乐观/极度乐观）及各维度得分
-- 当前市场所处阶段（缩量调整/量能温和/放量上攻/情绪过热）
-- 一句话结论：普涨 / 分化 / 退潮 / 修复，以及对监控标的整体影响
+- 根据传入的情绪评分（score / level）解读当前市场阶段。
+- 结合情绪对本只股票的整体影响（顺风 / 逆风 / 中性）。
 
-### 2) 逐股深度分析（每只股票必须包含以下子节）
-1. **公司业务定位**（主营、核心产品、产业链位置）— 需联网核实
-2. **当前市场叙事与阶段**（启动/强化/分歧/退潮）— 需联网核实
-3. **行业龙头与板块阶段** — 需联网核实
-4. **技术面** — MA5/MA10/MA20/MA60 排列；当前价格相对均线位置；RSI/MACD/KDJ 状态；量比异动；关键压力位/支撑位/失效位
-5. **资金面** — 主力净流入/流出趋势，超大单/大单结构，连续天数；量化短线/中长线评分（若有）
-6. **舆情与事件面**（利多/利空/争议点）— 需联网核实
-7. **双逻辑判断**
-   - 产业逻辑：在 / 弱化 / 失效（附原因）
-   - 交易逻辑：在 / 弱化 / 失效（附原因）
-8. **明日三情景动作**
-   - 强情景：触发条件 → 动作 → 目标位
-   - 中情景：触发条件 → 动作 → 目标位
-   - 弱情景：触发条件 → 止损位 → 动作
-9. **证据卡片**（E1 行情数据 / E2 官方披露 / E3 主流媒体 / E4 板块验证）
-10. **置信度**（高/中/低 + 原因）
+### 2) 技术面深度解读
+- MA5/MA10/MA20/MA60 多空排列；当前价格相对各均线的位置（上方/下方/刚穿越）。
+- RSI 超买超卖状态；MACD 金叉/死叉/背离；KDJ 钝化/交叉信号。
+- BOLL 开口/收口，价格所处通道位置（上轨/中轨/下轨附近）。
+- 量比异动分析；基于均线与 BOLL 通道估算参考压力位 / 支撑位 / 失效位（三档，注明为快照估算）。
 
-### 3) 组合分层建议（多只股票时）
-- A组（产业+交易逻辑同向）/ B组（产业在/交易弱）/ C组（交易逻辑受损）
-- 风险集中度说明；仓位调整优先级排序
+### 3) 资金面深度解读
+- 主力净流入/流出趋势，超大单/大单结构拆解。
+- 连续净流入/流出天数及加速/减速判断。
+- 量化短线评分与中长线评分（若数据中有 short_score / long_score）。
 
-### 4) 不确定性与自我修正
-- 本轮最不确定的 2~3 个点
+### 4) 选股器信号解读
+- 解读 selector_score / selector_rating 的含义与强弱。
+- 列出 buy_signals 中每条信号的触发原因。
+- 结合止损位（stop_loss）、止盈位（take_profit）、风险回报比（risk_reward_ratio）给出风控建议。
+- 若以上字段不存在，本节注明"选股器数据未提供"。
+
+### 5) 双逻辑判断
+- **交易逻辑**（技术面 + 资金面）：成立 / 弱化 / 失效（附具体数据依据）
+- **选股逻辑**（评分 + 信号）：成立 / 弱化 / 失效（附具体数据依据）
+
+### 6) 明日三情景动作
+| 情景 | 触发条件（具体价位或指标值） | 动作 | 目标位 / 止损位 |
+|------|--------------------------|------|----------------|
+| 强情景 | 填入具体条件 | 买入/加仓 | 填入具体价位 |
+| 中情景 | 填入具体条件 | 持有/观望 | 填入具体价位 |
+| 弱情景 | 填入具体条件 | 减仓/止损 | 填入具体价位 |
+
+### 7) 证据卡片
+- E1 行情数据
+- E2 技术指标数据
+- E3 资金流向数据
+- E4 选股器评分与信号（若无则注明）
+
+### 8) 置信度与不确定性
+- 综合置信度：高 / 中 / 低（附原因）
+- 最不确定的 2~3 个点
 - 可能导致错判的条件
-- 下一轮补证据与阈值修正计划
+- 建议用户补充的数据项
 
-### 5) 一句话总结
-> 用一句话（≤30字）概括本次分析的核心结论，格式：**「{代码} {名称}：{状态} — {建议动作}」**，多只股票依次列出。
+### 9) 总结
+输出 3~5 句话的综合结论，涵盖以下要点：
+1. 以 **「股票代码 公司名称：当前状态 — 建议动作」** 作为开篇句。
+2. 说明技术面与选股逻辑是否共振，以及最关键的支撑/压力位。
+3. 点明核心风险或不确定因素（若置信度为低/中，须明确指出）。
+4. 给出具体的持仓建议（轻仓/半仓/满仓/观望/止损）及止损触发条件。
 
 ## 注意事项
-- 仅基于调用方提供的结构化数据写作"数据摘要"；基本面/舆情部分须明确标注"需联网核实"。
-- 如果结构化数据不足（如技术指标缺失），在不确定性部分说明并建议补充。
+- 所有章节严格基于传入的结构化数据，不引用任何外部或训练知识补充内容。
+- 支撑/压力位仅基于当前快照的均线与 BOLL 数据估算，不代表历史形态分析。
+- 如果结构化数据存在缺失字段，在"不确定性"章节说明并建议补充。
 - 输出语言：中文为主，技术指标名词可中英混写。
-- 报告末尾必须有"一句话总结"章节。
+- 报告末尾必须有"总结"章节。
 """
+
+# ── 字段常量 ──────────────────────────────────────────────────────────────
+_QUOTE_FIELDS = (
+    "price", "change_pct", "change_amount", "open", "high", "low",
+    "volume", "turnover", "volume_ratio", "pe_ttm", "market_cap", "update_time",
+)
+_TECH_FIELDS = (
+    "ma5", "ma10", "ma20", "ma60", "rsi", "dif", "dea",
+    "kdj_k", "kdj_d", "kdj_j", "boll_upper", "boll_mid", "boll_lower",
+    "atr", "short_score", "long_score",
+)
+_FUND_FIELDS = (
+    "main_net_inflow", "main_net_inflow_pct", "main_ratio",
+    "super_large_net", "large_net", "medium_net", "small_net", "days_continuous",
+)
+_SELECTOR_FIELDS = (
+    "selector_score", "selector_rating", "buy_signals",
+    "stop_loss", "take_profit", "stop_loss_pct", "take_profit_pct", "risk_reward_ratio",
+)
 
 
 # ── 数据构建 ──────────────────────────────────────────────────────────────
-
-def _build_prompt(codes: List[str], sentiment: dict, stocks_data: list) -> str:
-    """将缓存数据组装成 GPT 用户消息"""
+def _build_prompt(code: str, sentiment: dict, stock_data: dict) -> str:
+    """将单只股票数据组装成用户消息"""
     ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    s  = stock_data
+    ti = s.get("tech_indicators") or {}
+    ff = s.get("fund_flow") or {}
+
     payload = {
         "timestamp": ts,
-        "codes": codes,
+        "code": code,
+        "name": s.get("name", ""),
         "market_sentiment": {
-            "score": sentiment.get("score"),
-            "level": sentiment.get("level"),
-            "emoji": sentiment.get("emoji"),
-            "description": sentiment.get("description"),
+            **{k: sentiment.get(k) for k in ("score", "level", "emoji", "description")},
             "stats": sentiment.get("stats", {}),
         },
-        "stocks": [],
+        "quote":           {k: s.get(k)  for k in _QUOTE_FIELDS},
+        "tech_indicators": {**{k: ti.get(k) for k in _TECH_FIELDS}, "macd_hist": ti.get("macd")} if ti is not None else {},
+        "fund_flow":       {k: ff.get(k) for k in _FUND_FIELDS} if ff is not None else {},
+        **{k: s[k] for k in _SELECTOR_FIELDS if k in s},
     }
 
-    for s in stocks_data:
-        code = s.get("code", "")
-        entry = {
-            "code": code,
-            "name": s.get("name", ""),
-            "price": s.get("price"),
-            "change_pct": s.get("change_pct"),
-            "change_amount": s.get("change_amount"),
-            "open": s.get("open"),
-            "high": s.get("high"),
-            "low": s.get("low"),
-            "volume": s.get("volume"),
-            "turnover": s.get("turnover"),
-            "volume_ratio": s.get("volume_ratio"),
-            "pe_ttm": s.get("pe_ttm"),
-            "market_cap": s.get("market_cap"),
-            "update_time": s.get("update_time"),
-        }
-        # 技术指标
-        ti = s.get("tech_indicators") or {}
-        if ti:
-            entry["tech_indicators"] = {
-                "ma5": ti.get("ma5"),
-                "ma10": ti.get("ma10"),
-                "ma20": ti.get("ma20"),
-                "ma60": ti.get("ma60"),
-                "rsi": ti.get("rsi"),
-                "macd": ti.get("macd"),
-                "kdj_k": ti.get("kdj_k"),
-                "kdj_d": ti.get("kdj_d"),
-                "kdj_j": ti.get("kdj_j"),
-                "boll_upper": ti.get("boll_upper"),
-                "boll_mid": ti.get("boll_mid"),
-                "boll_lower": ti.get("boll_lower"),
-                "atr": ti.get("atr"),
-                "short_score": ti.get("short_score"),
-                "long_score": ti.get("long_score"),
-            }
-        # 资金流
-        ff = s.get("fund_flow") or {}
-        if ff:
-            entry["fund_flow"] = {
-                "main_net_inflow": ff.get("main_net_inflow"),
-                "main_net_inflow_pct": ff.get("main_net_inflow_pct"),
-                "super_large_net": ff.get("super_large_net"),
-                "large_net": ff.get("large_net"),
-                "medium_net": ff.get("medium_net"),
-                "small_net": ff.get("small_net"),
-                "days_continuous": ff.get("days_continuous"),
-            }
-        payload["stocks"].append(entry)
-
     return (
-        "## 分析请求\n"
+        "## 单股深度分析请求\n"
         f"- 时间戳：{ts}\n"
-        f"- 分析标的：{', '.join(codes)}\n\n"
+        f"- 分析标的：{code}  {s.get('name', '')}\n\n"
         "## 结构化市场数据（JSON）\n"
         "```json\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
         + "\n```\n\n"
-        "请按照报告结构输出完整分析。"
+        "请按照单股报告结构输出完整深度分析。"
     )
 
 
-# ── 后端选择 ─────────────────────────────────────────────────────────────
-
-def _resolve_model_and_backend() -> tuple:
-    """
-    根据 .env 中的 LLM_MODEL 确定 (backend, model_name)。
-    优先级：LLM_MODEL > DEEPSEEK_API_KEY 存在 > 默认 GPT
-    """
-    m = _LLM_MODEL.strip()
-    if m.lower().startswith("deepseek"):
-        return "deepseek", m
-    if m:  # 明确指定了非 deepseek 模型（如 gpt-4.1）
-        return "gpt", m
-    # 未设置 LLM_MODEL：有 DeepSeek key 则用 DeepSeek，否则用 GPT
-    if _DS_API_KEY:
-        return "deepseek", _DS_MODEL
-    return "gpt", _GPT_MODEL
-
-
-def _get_gpt_client():
-    if not _API_KEY:
-        raise RuntimeError("未设置 CI_TOKEN 或 OPENAI_API_KEY，无法调用 GPT。")
-    from openai import OpenAI
-    return OpenAI(
-        base_url=_BASE_URL,
-        api_key=_API_KEY,
-        default_headers={"x-cisco-app": _APP_NAME},
-    )
-
-
-def _get_deepseek_client():
-    if not _DS_API_KEY:
-        raise RuntimeError("未设置 DEEPSEEK_API_KEY，无法调用 DeepSeek。")
-    from openai import OpenAI
-    return OpenAI(base_url=_DS_BASE_URL, api_key=_DS_API_KEY)
-
-
-def run_analysis(
-    codes: List[str],
+# ── 公共入口 ──────────────────────────────────────────────────────────────
+def run_single_analysis(
+    code: str,
     sentiment: dict,
-    stocks_data: list,
+    stock_data: dict,
     stream: bool = False,
-):
+) -> Union[str, Generator[str, None, None]]:
     """
-    执行 LLM 分析，后端和模型由 .env 中 LLM_MODEL 决定。
-    - stream=False：返回完整报告字符串
-    - stream=True：返回 Generator[str, None, None]，逐 token yield
+    针对单只股票执行 LLM 深度分析。
+
+    参数：
+        code       — 股票代码，如 "600519"
+        sentiment  — 市场情绪字典（score / level / description / stats）
+        stock_data — 单只股票数据字典（包含 quote / tech_indicators / fund_flow 等）
+        stream     — True 时返回 Generator[str, None, None]，False 时返回完整报告字符串
     """
-    backend, actual_model = _resolve_model_and_backend()
-    print(f"[LLM] 使用后端={backend} 模型={actual_model}", flush=True)
-    user_msg = _build_prompt(codes, sentiment, stocks_data)
-
-    if backend == "deepseek":
-        return _run_deepseek(actual_model, user_msg, stream)
-    else:
-        return _run_gpt(actual_model, user_msg, stream)
+    print(f"[LLM-单股] 使用后端={_BACKEND} 模型={_MODEL} 标的={code}", flush=True)
+    user_msg = _build_prompt(code, sentiment, stock_data)
+    if _BACKEND == "deepseek":
+        return _run_deepseek(_MODEL, user_msg, stream)
+    return _run_gpt(_MODEL, user_msg, stream)
 
 
-# ── GPT (Responses API) ──────────────────────────────────────────────────
-
-def _run_gpt(model: str, user_msg: str, stream: bool):
+# ── GPT (Responses API + Chat Completions 兜底) ───────────────────────────
+def _run_gpt(model: str, user_msg: str, stream: bool) -> Union[str, Generator[str, None, None]]:
     client = _get_gpt_client()
-    input_messages = _build_responses_messages(user_msg)
-    chat_messages = _build_chat_messages(user_msg)
-    if stream:
-        return _gpt_stream(client, model, input_messages, chat_messages)
-    try:
-        # 优先使用 Responses API（与当前项目默认保持一致）
-        resp = client.responses.create(model=model, input=input_messages)
-        return resp.output[0].content[0].text
-    except Exception:
-        # 兼容 02 项目的 Chat Completions 路径
-        resp = client.chat.completions.create(model=model, messages=chat_messages, stream=False)
-        return resp.choices[0].message.content
-
-
-def _build_responses_messages(user_msg: str) -> list:
-    return [
+    responses_msgs = [
         {"role": "system", "content": [{"type": "input_text", "text": _SYSTEM_PROMPT}]},
         {"role": "user",   "content": [{"type": "input_text", "text": user_msg}]},
     ]
-
-
-def _build_chat_messages(user_msg: str) -> list:
-    return [
+    chat_msgs = [
         {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": user_msg},
+        {"role": "user",   "content": user_msg},
     ]
-
-
-def _gpt_stream(client, model: str, input_messages: list, chat_messages: list) -> Generator[str, None, None]:
+    if stream:
+        return _gpt_stream(client, model, responses_msgs, chat_msgs)
     try:
-        with client.responses.stream(model=model, input=input_messages) as s:
+        resp = client.responses.create(model=model, input=responses_msgs)
+        return resp.output[0].content[0].text
+    except Exception:
+        resp = client.chat.completions.create(model=model, messages=chat_msgs, stream=False)
+        return resp.choices[0].message.content
+
+
+def _gpt_stream(client, model: str, responses_msgs: list, chat_msgs: list) -> Generator[str, None, None]:
+    try:
+        with client.responses.stream(model=model, input=responses_msgs) as s:
             for event in s:
                 if hasattr(event, "delta") and hasattr(event.delta, "text"):
                     yield event.delta.text
                 elif getattr(event, "type", None) == "response.output_text.delta":
                     yield getattr(event, "delta", "")
         return
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[LLM] Responses API 流失败，回退 Chat Completions：{e}", flush=True)
 
-    # 响应流接口不可用时，回退到 chat.completions 流式输出（参照 02 项目）
-    resp = client.chat.completions.create(model=model, messages=chat_messages, stream=True)
-    for chunk in resp:
+    for chunk in client.chat.completions.create(model=model, messages=chat_msgs, stream=True):
         delta = chunk.choices[0].delta if chunk.choices else None
         if delta and delta.content:
             yield delta.content
 
 
 # ── DeepSeek (Chat Completions API) ──────────────────────────────────────
-
-def _run_deepseek(model: str, user_msg: str, stream: bool):
+def _run_deepseek(model: str, user_msg: str, stream: bool) -> Union[str, Generator[str, None, None]]:
     client = _get_deepseek_client()
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
@@ -316,55 +295,46 @@ def _run_deepseek(model: str, user_msg: str, stream: bool):
 
 
 def _deepseek_stream(client, model: str, messages: list) -> Generator[str, None, None]:
-    resp = client.chat.completions.create(model=model, messages=messages, stream=True)
-    for chunk in resp:
+    for chunk in client.chat.completions.create(model=model, messages=messages, stream=True):
         delta = chunk.choices[0].delta if chunk.choices else None
         if delta and delta.content:
             yield delta.content
 
 
 # ── 连通性测试 ────────────────────────────────────────────────────────────
-
 def test_connection() -> bool:
-    """
-    发送一条极简请求，验证 API Key 和网络是否正常。
-    成功返回 True，失败打印原因并返回 False。
-    """
-    backend, model = _resolve_model_and_backend()
-    print(f"Backend  : {backend}")
-    print(f"Model    : {model}")
-    if backend == "gpt":
+    """发送一条极简请求，验证 API Key 和网络是否正常。"""
+    print(f"Backend  : {_BACKEND}")
+    print(f"Model    : {_MODEL}")
+
+    if _BACKEND == "gpt":
         print(f"BASE_URL : {_BASE_URL}")
         print(f"API_KEY  : {'已设置 (' + _API_KEY[:8] + '...)' if _API_KEY else '❌ 未设置'}")
         if not _API_KEY:
             print("❌ 未设置 CI_TOKEN 或 OPENAI_API_KEY，请先配置环境变量或 .env 文件。")
             return False
         try:
-            client = _get_gpt_client()
-            resp = client.responses.create(
-                model=model,
+            resp = _get_gpt_client().responses.create(
+                model=_MODEL,
                 input=[{"role": "user", "content": [{"type": "input_text", "text": "reply with: ok"}]}],
             )
-            reply = resp.output[0].content[0].text.strip()
-            print(f"✅ GPT 连通正常，模型回复：{reply!r}")
+            print(f"✅ GPT 连通正常，模型回复：{resp.output[0].content[0].text.strip()!r}")
             return True
         except Exception as e:
             print(f"❌ 连接失败：{e}")
             return False
-    else:  # deepseek
+    else:
         print(f"DS_URL   : {_DS_BASE_URL}")
         print(f"DS_KEY   : {'已设置 (' + _DS_API_KEY[:8] + '...)' if _DS_API_KEY else '❌ 未设置'}")
         if not _DS_API_KEY:
             print("❌ 未设置 DEEPSEEK_API_KEY。")
             return False
         try:
-            client = _get_deepseek_client()
-            resp = client.chat.completions.create(
-                model=model, stream=False,
-                messages=[{"role": "user", "content": "reply with: ok"}]
+            resp = _get_deepseek_client().chat.completions.create(
+                model=_MODEL, stream=False,
+                messages=[{"role": "user", "content": "reply with: ok"}],
             )
-            reply = resp.choices[0].message.content.strip()
-            print(f"✅ DeepSeek 连通正常，模型回复：{reply!r}")
+            print(f"✅ DeepSeek 连通正常，模型回复：{resp.choices[0].message.content.strip()!r}")
             return True
         except Exception as e:
             print(f"❌ 连接失败：{e}")

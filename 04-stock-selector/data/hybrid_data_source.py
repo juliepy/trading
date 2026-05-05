@@ -175,36 +175,52 @@ class HybridDataSource:
         """
         today = datetime.now().strftime('%Y-%m-%d')
         cache_key = (code, days)
+
+        # 命中内存缓存
         cached = self._history_cache.get(cache_key)
         if cached and cached[0] == today:
+            print(f'[K线] {code} 内存缓存命中，{len(cached[1])} 行', flush=True)
             return cached[1].copy()
 
         # 查 SQLite 持久化缓存（同一天内跨进程复用）
         db_result = self._db_cache.get_history_kline(code, days)
         if db_result is not None and not db_result.empty:
+            print(f'[K线] {code} SQLite缓存命中，{len(db_result)} 行', flush=True)
             self._history_cache[cache_key] = (today, db_result)
             return db_result.copy()
 
+        print(f'[K线] {code} 缓存未命中，开始远程拉取（days={days}）', flush=True)
+
         # 方案1: Tushare（推荐，数据质量高）
         if self.tushare_available:
+            print(f'[K线] {code} 尝试 Tushare...', flush=True)
             result = self._get_tushare_history(code, days)
             if result is not None and not result.empty:
+                print(f'[K线] {code} ✅ Tushare 成功，{len(result)} 行', flush=True)
                 self._history_cache[cache_key] = (today, result)
                 self._db_cache.save_history_kline(code, days, result)
                 return result
+            print(f'[K线] {code} ❌ Tushare 返回空，降级到东方财富', flush=True)
 
         # 方案2: 东方财富（免费、快）
+        print(f'[K线] {code} 尝试 东方财富...', flush=True)
         result = self._get_eastmoney_history(code, days)
         if result is not None and not result.empty:
+            print(f'[K线] {code} ✅ 东方财富 成功，{len(result)} 行', flush=True)
             self._history_cache[cache_key] = (today, result)
             self._db_cache.save_history_kline(code, days, result)
             return result
+        print(f'[K线] {code} ❌ 东方财富 返回空，降级到 akshare', flush=True)
 
         # 方案3: akshare（兜底）
+        print(f'[K线] {code} 尝试 akshare...', flush=True)
         result = self._get_akshare_history(code, days)
         if result is not None and not result.empty:
+            print(f'[K线] {code} ✅ akshare 成功，{len(result)} 行', flush=True)
             self._history_cache[cache_key] = (today, result)
             self._db_cache.save_history_kline(code, days, result)
+        else:
+            print(f'[K线] {code} ❌ 所有数据源均失败，返回 None', flush=True)
         return result
     
     def _get_eastmoney_realtime(self, code: str) -> Optional[Dict]:
