@@ -146,8 +146,11 @@ def _fetch_eastmoney_fund_flow(code: str) -> dict:
 
 
 def _fetch_eastmoney_days_continuous(code: str):
-    """从东方财富历史资金流向K线计算主力连续净流入/流出天数。
-    返回：正整数=连续净流入N天；负整数=连续净流出N天；None=获取失败。
+    """从东方财富历史资金流向K线计算主力连续净流入/流出天数 + 近5日累计净流入。
+    返回 dict：
+      days_continuous: 正整数=连续净流入N天；负整数=连续净流出N天
+      main_net_5day:   近5个交易日主力净流入累计（元）
+    失败时返回 None。
     """
     import urllib.request, urllib.parse, json as _json
     secid = '1.' + code if code.startswith('6') else '0.' + code
@@ -178,7 +181,7 @@ def _fetch_eastmoney_days_continuous(code: str):
                 pass
     if not main_flows:
         return None
-    # 从最近一天向前统计同向天数
+    # 连续方向天数
     positive = main_flows[-1] >= 0
     count = 0
     for v in reversed(main_flows):
@@ -186,7 +189,13 @@ def _fetch_eastmoney_days_continuous(code: str):
             count += 1
         else:
             break
-    return count if positive else -count
+    # 近5日累计净流入
+    last5 = main_flows[-5:] if len(main_flows) >= 5 else main_flows
+    main_net_5day = sum(last5)
+    return {
+        'days_continuous': count if positive else -count,
+        'main_net_5day':   round(main_net_5day, 2),
+    }
 
 
 # ── 页面路由 ────────────────────────────────────────────────────────────────
@@ -278,10 +287,10 @@ def api_gpt_analyze():
     from flask import Response, stream_with_context
     data = request.json or {}
     stocks = data.get('stocks')
+    selector_type = data.get('type', 'long')
 
     # 若未传 stocks，先运行选股器
     if not stocks:
-        selector_type = data.get('type', 'long')
         top_n = int(data.get('top_n', 5))
         try:
             if selector_type == 'short':
@@ -322,12 +331,22 @@ def api_gpt_analyze():
         is_short = 'rsi' in det    # short_term_selector 特征键
         is_long  = 'trend' in det  # long_term_selector 特征键
 
+        # 从 enhanced 选股器的 details['fundamental'] 提取基本面数据
+        _fund_det = det.get('fundamental') or {}
+
         entry = {
             'code':         s.get('code'),
             'name':         s.get('name'),
             'price':        s.get('price'),
             'change_pct':   s.get('change_pct'),
             'volume_ratio': vol_info.get('volume_ratio'),
+            # 基本面（enhanced 选股器已算；long/short 选股器在补充阶段从缓存填入）
+            'fundamental': {
+                'roe':            _fund_det.get('roe'),
+                'dividend_yield': _fund_det.get('dividend_yield'),
+                'revenue_growth': _fund_det.get('revenue_growth'),
+                'profit_growth':  _fund_det.get('profit_growth'),
+            },
             'tech_indicators': {
                 # 均线 —— long_term 在 trend 里；short_term 暂无，后面缓存补充
                 'ma20':       trend_info.get('ma20'),
@@ -408,6 +427,9 @@ def api_gpt_analyze():
                     entry['pe_ttm'] = round(float(_pe), 2)
                 if entry.get('market_cap') is None and _em.get('market_cap'):
                     entry['market_cap'] = _em['market_cap']
+                # 流通市值：f21
+                if entry.get('float_market_cap') is None and _em.get('float_market_cap'):
+                    entry['float_market_cap'] = _em['float_market_cap']
                 if entry.get('volume_ratio') is None and _em.get('volume_ratio'):
                     entry['volume_ratio'] = _em['volume_ratio']
                 if entry.get('turnover') is None and _em.get('turnover'):
@@ -422,15 +444,17 @@ def api_gpt_analyze():
                        'boll_upper', 'boll_mid', 'boll_lower', 'atr')
             ti = entry.setdefault('tech_indicators', {})
 
-            # 2a) 从缓存补（MA5/10/20/RSI/MACD/DIF/DEA）
+            # 2a) 从缓存补（MA5/10/20/RSI/MACD/DIF/DEA；MA60 缓存表暂无列，跳过无妨）
             _ti_cache = _sc.get_tech_indicators(_code)
             if _ti_cache:
                 for _k in ('ma5', 'ma10', 'ma20', 'rsi', 'macd', 'dif', 'dea'):
                     if ti.get(_k) is None and _ti_cache.get(_k) is not None:
                         ti[_k] = _ti_cache[_k]
 
-            # 2b) 仍有缺失 → 从历史K线实时计算全部指标
-            if any(ti.get(_k) is None for _k in _ALL_TI):
+            # 2b) 仍有缺失（尤其 MA60/KDJ/BOLL/ATR 缓存无存）→ 从历史K线实时计算全部指标
+            _missing_ti = [_k for _k in _ALL_TI if ti.get(_k) is None]
+            if _missing_ti:
+                print(f'[补充] {_code} 技术指标缺失: {_missing_ti}，启动K线计算…', flush=True)
                 try:
                     from hybrid_data_source import get_hybrid_source as _ghs
                     _df = _ghs().get_history_data(_code, days=120)
@@ -439,9 +463,14 @@ def api_gpt_analyze():
                         for _k, _v in _calc.items():
                             if ti.get(_k) is None and _v is not None:
                                 ti[_k] = _v
-                        print(f'[补充] {_code} K线计算指标完成: {list(_calc.keys())}', flush=True)
+                        _filled = [k for k in _missing_ti if ti.get(k) is not None]
+                        print(f'[补充] {_code} K线指标填入: {_filled}', flush=True)
+                    else:
+                        print(f'⚠️ {_code} K线数据不足（{len(_df) if _df is not None else 0}条）', flush=True)
                 except Exception as _e:
+                    import traceback as _tb
                     print(f'⚠️ {_code} K线指标计算失败: {_e}', flush=True)
+                    _tb.print_exc()
 
             # ③ 基本面 PE：仅在东财未提供有效值时从缓存读取
             if not (entry.get('pe_ttm') and float(entry['pe_ttm']) > 0):
@@ -453,6 +482,38 @@ def api_gpt_analyze():
                         entry['pe_ttm'] = round(float(_row[0]), 2)
                 except Exception:
                     pass
+
+            # ⑤ 基本面 ROE / 股息率 / 营收增长率
+            #    优先级：entry 已有（enhanced 已算）> StockCache 缓存 > 实时 FundamentalData
+            _fund = entry.setdefault('fundamental', {})
+            if not any(_fund.get(_k) for _k in ('roe', 'dividend_yield', 'revenue_growth')):
+                # 先走缓存（enhanced 模式已写入）
+                try:
+                    _f_cached = _sc.get_fundamental(_code)
+                    if _f_cached:
+                        for _fk in ('roe', 'dividend_yield', 'revenue_growth', 'profit_growth'):
+                            if _fund.get(_fk) is None and _f_cached.get(_fk) is not None:
+                                _fund[_fk] = _f_cached[_fk]
+                except Exception:
+                    pass
+                # 若缓存仍无数据（short/long 模式从未运行过 enhanced），实时抓取
+                if not any(_fund.get(_k) for _k in ('roe', 'dividend_yield', 'revenue_growth')):
+                    try:
+                        import sys as _sys2, os as _os2
+                        _sel_dir = _os2.path.join(_ROOT, 'selectors')
+                        if _sel_dir not in _sys2.path:
+                            _sys2.path.insert(0, _sel_dir)
+                        from fundamental_data import FundamentalData as _FD
+                        _fd = _FD(cache=_sc)
+                        _f_live = _fd.get_stock_fundamental(_code)
+                        for _fk in ('roe', 'dividend_yield', 'revenue_growth', 'profit_growth'):
+                            if _f_live.get(_fk) is not None:
+                                _fund[_fk] = _f_live[_fk]
+                        print(f'[补充] {_code} 基本面(实时): ROE={_fund.get("roe")} '
+                              f'股息率={_fund.get("dividend_yield")} '
+                              f'营收增长={_fund.get("revenue_growth")}', flush=True)
+                    except Exception as _e:
+                        print(f'⚠️ {_code} 基本面实时获取失败: {_e}', flush=True)
 
             # ④ 资金流向明细（超大/大/中/小单净流入 + 主力净占比 + 连续天数）
             _ff = entry.setdefault('fund_flow', {})
@@ -467,12 +528,14 @@ def api_gpt_analyze():
             except Exception as _e:
                 print(f'⚠️ {_code} 资金流向获取失败: {_e}', flush=True)
 
-            # 连续净流入/流出天数
+            # 连续净流入/流出天数 + 近5日累计净流入
             try:
-                _days = _fetch_eastmoney_days_continuous(_code)
-                if _days is not None:
-                    _ff['days_continuous'] = _days
-                    print(f'[补充] {_code} 连续资金方向: {_days} 天', flush=True)
+                _days_result = _fetch_eastmoney_days_continuous(_code)
+                if _days_result is not None:
+                    _ff['days_continuous'] = _days_result['days_continuous']
+                    _ff['main_net_5day']   = _days_result['main_net_5day']
+                    print(f'[补充] {_code} 连续资金方向: {_days_result["days_continuous"]} 天 '
+                          f'| 近5日累计: {_days_result["main_net_5day"]/1e8:.2f}亿', flush=True)
             except Exception as _e:
                 print(f'⚠️ {_code} 连续天数获取失败: {_e}', flush=True)
 
@@ -494,14 +557,18 @@ def api_gpt_analyze():
             def generate():
                 for entry in stocks_data:
                     yield from run_single_analysis(
-                        entry['code'], sentiment, entry, stream=True
+                        entry['code'], sentiment, entry,
+                        stream=True, selector_type=selector_type
                     )
             return Response(stream_with_context(generate()), content_type='text/plain; charset=utf-8')
         else:
             reports = []
             for entry in stocks_data:
                 reports.append(
-                    run_single_analysis(entry['code'], sentiment, entry, stream=False)
+                    run_single_analysis(
+                        entry['code'], sentiment, entry,
+                        stream=False, selector_type=selector_type
+                    )
                 )
             report = '\n\n---\n\n'.join(reports)
             return jsonify({'status': 'success', 'report': report})

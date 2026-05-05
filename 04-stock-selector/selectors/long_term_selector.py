@@ -231,29 +231,17 @@ class LongTermSelector:
                 'main_in': fund_flow.get('main_in', 0) / 10000 if fund_flow else 0
             }
             
-            # ====== 8. 计算买卖点（基于ATR动态止损） ======
+            # ====== 8. 计算买卖点（中长线：固定 -8% 止损 / +20% 止盈） ======
             current_price = float(stock_info.get('price', df['close'].iloc[-1]))
-            atr_value = atr.iloc[-1]
 
-            # 中长线使用更宽松的止损止盈
-            stop_multiplier = 2.5  # ATR*2.5
-            profit_multiplier = 4.0  # ATR*4.0
-
-            if atr_value > 0 and current_price > 0:
-                stop_loss = current_price - atr_value * stop_multiplier
-                take_profit = current_price + atr_value * profit_multiplier
-                stop_loss_pct = (stop_loss - current_price) / current_price * 100
-                take_profit_pct = (take_profit - current_price) / current_price * 100
-                risk = current_price - stop_loss
-                reward = take_profit - current_price
-                risk_reward_ratio = reward / risk if risk > 0 else 2.5
-            else:
-                # 默认值
-                stop_loss = current_price * 0.92
-                take_profit = current_price * 1.20
-                stop_loss_pct = -8.0
-                take_profit_pct = 20.0
-                risk_reward_ratio = 2.5
+            # 中长线持股周期长（20-180日），使用固定幅度而非ATR动态计算
+            # 止损 -8%：接受正常波动，避免被中线震仓洗出
+            # 止盈 +20%：对应一波主升浪目标，风险收益比 2.5:1
+            stop_loss = current_price * 0.92
+            take_profit = current_price * 1.20
+            stop_loss_pct = -8.0
+            take_profit_pct = 20.0
+            risk_reward_ratio = 2.5
 
             details['trade_points'] = {
                 'buy_price': round(current_price, 2),

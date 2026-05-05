@@ -22,7 +22,8 @@ class StockCache:
     
     def _init_db(self):
         """初始化数据库表"""
-        self.conn = sqlite3.connect(self.db_path)
+        # check_same_thread=False：Flask 多线程模式下同一连接可跨线程读取
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         cursor = self.conn.cursor()
         
         # 股票基础信息表

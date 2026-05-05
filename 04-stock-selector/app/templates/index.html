@@ -92,6 +92,8 @@
     .badge-B\+{background:#fef3e2;color:#c28840}
     .badge-B{background:#f3f8e4;color:#7a9840}
     .badge-C{background:#f0edf4;color:#9a94a8}
+    .badge-buy{background:#e6f4ea;color:#1e7e34;font-weight:600}
+    .badge-nobuy{background:#f4e6e6;color:#9e2a2a;font-weight:600}
     .pos{color:#e06080}
     .neg{color:#60a880}
     #status{
@@ -218,7 +220,10 @@
     <table id="results-table" style="display:none">
       <thead><tr>
         <th>代码</th><th>名称</th><th>评分</th><th>评级</th>
-        <th>现价</th><th>买入价</th><th>止损价</th><th>止盈价</th><th>AI研报</th>
+        <th>现价</th><th>买入信号</th>
+        <th title="短线：现价−2×ATR（约-3%～-5%）&#10;中长线/增强版：现价×0.92（固定-8%）" style="cursor:help;border-bottom:1px dashed #a08ab8">止损价 ⓘ</th>
+        <th title="短线：现价+3×ATR（约+5%～+8%）&#10;中长线/增强版：现价×1.20（固定+20%）" style="cursor:help;border-bottom:1px dashed #a08ab8">止盈价 ⓘ</th>
+        <th>AI研报</th>
       </tr></thead>
       <tbody id="results-body"></tbody>
     </table>
@@ -239,7 +244,12 @@
         <li>点击 <strong>▶ 运行</strong>，系统自动扫描沪深300成分股（约250只主板蓝筹），根据历史K线计算技术指标并评分，完成后显示评分最高的 N 只。</li>
         <li>点击 <strong>📄 报告</strong>，生成本次选股的文字摘要，包含每只股票的信号说明和操作建议。</li>
         <li>点击每行末尾的 <strong>🤖 AI研报</strong>，针对该股单独调用 LLM 生成研读报告，包含产业逻辑、三情景价格、买入/止损/止盈建议，支持流式实时输出；再次点击可收起。</li>
-        <li>表格中的<strong>买入价 / 止损价 / 止盈价</strong>均由 ATR 动态计算（止损 = 现价 − 2×ATR，止盈 = 现价 + 3×ATR），仅供参考，不构成投资建议。</li>
+        <li>表格中的<strong>买入信号 / 止损价 / 止盈价</strong>说明：买入信号基于评分阈值与买入共振信号数判定（短线≥60分且共振≥2；中长线≥70分；增强版≥65分）。止损止盈计算方式因策略而异：
+          <ul style="margin-top:4px">
+            <li><span class="tag tag-short">短线</span> ATR 动态计算：止损 = 现价 − 2×ATR，止盈 = 现价 + 3×ATR（约 −3%～−5% / +5%～+8%）</li>
+            <li><span class="tag tag-long">中长线</span><span class="tag tag-enh">增强版</span> 固定比例：止损 = 现价 × 0.92（−8%），止盈 = 现价 × 1.20（+20%），风险收益比 2.5:1</li>
+          </ul>
+          以上数据仅供参考，不构成投资建议。</li>
       </ol>
       <div class="info-grid" style="margin-top:16px">
         <div class="info-item">
@@ -339,7 +349,7 @@ async function runSelector(){
       <td>${s.score??'-'}</td>
       <td><span class="badge badge-${(s.rating||'').replace('+','\\+')||'C'}">${s.rating||'-'}</span></td>
       <td class="${(s.change_pct||0)>=0?'pos':'neg'}">${s.price??'-'}</td>
-      <td>${s.buy_price??'-'}</td>
+      <td><span class="badge ${s.recommend?'badge-buy':'badge-nobuy'}">${s.recommend?'▲ 买入':'— 观望'}</span></td>
       <td>${s.stop_loss??'-'}</td>
       <td>${s.take_profit??'-'}</td>
       <td><button class="ai-btn" id="ai-btn-${i}" onclick="toggleStockAnalyze(${i})">🤖 AI研报</button></td>
