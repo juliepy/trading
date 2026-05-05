@@ -1,0 +1,16 @@
+# LLM 调用（scripts/llm_analyst.py + streamlit_app.py）
+openai>=1.0.0
+
+# 新闻抓取：模拟 Chrome TLS 指纹（scripts/news_fetcher.py）
+curl_cffi>=0.6.0
+
+# 新闻抓取：HTML 清洗（scripts/news_fetcher.py）
+beautifulsoup4>=4.12.0
+
+# 可视化图表（demo.py 模式3 + streamlit_app.py）
+matplotlib>=3.5.0
+
+# Web 聊天界面（streamlit_app.py）
+streamlit>=1.35.0
+
+# scripts/a_share_snapshot.py 和 demo.py 模式1 仅使用标准库，无额外依赖
