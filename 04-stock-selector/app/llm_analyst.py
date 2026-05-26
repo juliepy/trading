@@ -462,5 +462,715 @@ def test_connection() -> bool:
             return False
 
 
+# ── 股票情绪分析（仿 01-News_Sentiment_Scanner 风格）────────────────────────
+
+# 1) 单条新闻情绪（与 01/scanner/sentiment.py 完全一致）
+_NEWS_SENTIMENT_SYSTEM = (
+    "你是专业的中国股市情感分析师。"
+    "分析以下财经新闻对 A 股市场的情感倾向，"
+    "仅返回 JSON（不要有其他文字）："
+    '{"sentiment": "正面/负面/中性", "score": 浮点数, "reason": "简短理由(30字内)"}'
+    "score 范围：-1.0（极度负面）到 1.0（极度正面）。"
+)
+
+# 2) 综合情绪（新闻汇总 + 技术指标 + 双逻辑 + 三情景）
+_STOCK_SENTIMENT_SYSTEM = (
+    "你是一名专业的股票分析师。"
+    "请帮我分析 [股票代码或名称]（[市场，如 A股/港股/美股]）在 [今天的日期] 的行情与相关新闻。"
+    "请按以下结构完成分析："
+    "1. 今日行情概览：开盘价、收盘价、最高/最低价；涨跌幅、成交量与换手率；与所属指数对比表现。"
+    "2. 今日关键新闻与事件：公司公告（业绩、增减持、重大合同等）；行业政策或宏观新闻；社交媒体/论坛情绪亮点。"
+    "3. 资金与情绪面：主力资金净流入/流出；北向/南向资金动向（如适用）；近期融资融券变化。"
+    "4. 技术面简析：当前处于主要均线（5/10/20/60日）的位置；MACD、RSI或KDJ指标的短期信号。"
+    "5. 综合判断与风险提示：短期（1-3日）多空倾向；重点风险点（如解禁、监管、汇率等）；是否需要等待更明确信号。"
+    "请基于可靠公开信息（如财联社、同花顺、东方财富、Reuters、Bloomberg等），并明确说明数据的假设来源或建议用户自行核实。"
+    "所有关键判断必须引用输入中的具体数字或字段，不得编造数据。"
+    "仅返回单个 JSON 对象（不要 markdown、不要额外文字）。"
+    "JSON 必须包含以下字段（全部必填，缺失时写'数据不足'）："
+    "{"
+    "\"sentiment\":\"正面/负面/中性\","
+    "\"score\":-1.0到1.0浮点数,"
+    "\"reason\":\"综合判断核心依据（40字内）\","
+    "\"news_summary_text\":\"对应第2部分关键新闻与事件（含信息来源与核实提醒，120字内）\","
+    "\"technical_analysis\":\"对应第4部分技术面简析（120字内）\","
+    "\"fund_flow_analysis\":\"对应第3部分资金与情绪面（120字内）\","
+    "\"industry_logic_status\":\"成立/弱化/失效\","
+    "\"industry_logic_reason\":\"产业/宏观逻辑判断依据（60字内）\","
+    "\"trading_logic_status\":\"成立/弱化/失效\","
+    "\"trading_logic_reason\":\"短期交易逻辑判断依据（60字内）\","
+    "\"scenario_strong\":\"强情景：触发条件→动作→目标位\","
+    "\"scenario_mid\":\"中情景：触发条件→动作\","
+    "\"scenario_weak\":\"弱情景：触发条件→动作→止损位\","
+    "\"impact_score\":\"影响评分（0-100）\","
+    "\"confidence\":\"高/中/低\","
+    "\"confidence_reason\":\"置信度说明（40字内）\","
+    "\"one_line_conclusion\":\"代码 名称：状态 — 建议动作\","
+    "\"tech_alignment\":\"第1部分行情与第4部分技术信号的一致性简评\","
+    "\"conclusion\":\"对应第5部分综合判断与风险提示（120字内）\""
+    "}"
+    "输出示例（字段名必须完全一致）："
+    "{\"sentiment\":\"中性\",\"score\":0.12,\"reason\":\"量价配合一般，消息面中性\","
+    "\"news_summary_text\":\"今日公告平淡，行业消息偏中性（来源示例：东方财富/Reuters，需用户复核）\","
+    "\"technical_analysis\":\"价格位于MA10上方MA20附近，MACD柱体收敛，RSI中位\","
+    "\"fund_flow_analysis\":\"主力小幅净流入，北向资金无明显增量，融资融券变化有限\","
+    "\"industry_logic_status\":\"弱化\",\"industry_logic_reason\":\"缺少增量基本面催化\","
+    "\"trading_logic_status\":\"成立\",\"trading_logic_reason\":\"短线仍在震荡上沿\","
+    "\"scenario_strong\":\"放量突破前高→轻仓跟随→看前高上方\","
+    "\"scenario_mid\":\"区间震荡→持有观望\","
+    "\"scenario_weak\":\"跌破近两日低点→减仓止损\","
+    "\"impact_score\":\"62\",\"confidence\":\"中\",\"confidence_reason\":\"关键字段齐全但趋势不强\","
+    "\"one_line_conclusion\":\"000001 平安银行：震荡偏多 — 轻仓跟踪\","
+    "\"tech_alignment\":\"行情与技术信号基本一致\","
+    "\"conclusion\":\"短期偏震荡偏多，关注放量突破与资金持续性，未确认前不追高\"}"
+)
+
+# 分段 Prompt：将大任务拆分为小输出，降低 length 截断概率
+_STOCK_PROMPT_NEWS = (
+    "你是股票分析师。仅基于输入信息，输出单个 JSON（不要 markdown）。"
+    "字段仅包含："
+    "{\"sentiment\":\"正面/负面/中性\","
+    "\"score\":-1.0到1.0浮点数,"
+    "\"reason\":\"20-40字核心依据\","
+    "\"news_summary_text\":\"今日关键新闻与事件摘要（含来源与需核实提醒，120字内）\"}"
+)
+
+_STOCK_PROMPT_TECH_FUND = (
+    "你是股票分析师。仅基于输入信息，输出单个 JSON（不要 markdown）。"
+    "字段仅包含："
+    "{\"technical_analysis\":\"技术面简析（均线/MACD/RSI/KDJ，120字内）\","
+    "\"fund_flow_analysis\":\"资金与情绪面（主力/北南向/两融，120字内）\","
+    "\"tech_alignment\":\"行情与技术信号一致性简评（60字内）\"}"
+)
+
+_STOCK_PROMPT_DECISION = (
+    "你是股票分析师。仅基于输入信息，输出单个 JSON（不要 markdown）。"
+    "字段仅包含："
+    "{"
+    "\"industry_logic_status\":\"成立/弱化/失效\","
+    "\"industry_logic_reason\":\"产业/宏观逻辑依据（60字内）\","
+    "\"trading_logic_status\":\"成立/弱化/失效\","
+    "\"trading_logic_reason\":\"交易逻辑依据（60字内）\","
+    "\"scenario_strong\":\"强情景：触发条件→动作→目标位\","
+    "\"scenario_mid\":\"中情景：触发条件→动作\","
+    "\"scenario_weak\":\"弱情景：触发条件→动作→止损位\","
+    "\"impact_score\":\"0-100\","
+    "\"confidence\":\"高/中/低\","
+    "\"confidence_reason\":\"置信度说明（40字内）\","
+    "\"one_line_conclusion\":\"代码 名称：状态 — 建议动作\","
+    "\"conclusion\":\"综合判断与风险提示（120字内）\""
+    "}"
+)
+
+
+def _llm_call(messages: list, max_tokens: int = 300) -> str:
+    """统一 LLM 调用（非流式），返回文本内容字符串。"""
+    if _BACKEND == "deepseek":
+        client = _get_deepseek_client()
+        resp = client.chat.completions.create(
+            model=_MODEL, messages=messages, stream=False,
+            temperature=0.1, max_tokens=max_tokens,
+        )
+        finish_reason = getattr(resp.choices[0], "finish_reason", "")
+        text = (resp.choices[0].message.content or "").strip()
+        print(
+            f"[LLM] backend=deepseek model={_MODEL} finish_reason={finish_reason} "
+            f"len={len(text)} max_tokens={max_tokens}",
+            flush=True,
+        )
+        if _is_potentially_truncated_json(text):
+            retry_tokens = min(max_tokens + 220, 1400)
+            print(
+                f"[LLM] deepseek 返回疑似截断/空串，重试一次 max_tokens={retry_tokens}",
+                flush=True,
+            )
+            resp2 = client.chat.completions.create(
+                model=_MODEL, messages=messages, stream=False,
+                temperature=0.1, max_tokens=retry_tokens,
+            )
+            finish_reason2 = getattr(resp2.choices[0], "finish_reason", "")
+            text2 = (resp2.choices[0].message.content or "").strip()
+            print(
+                f"[LLM] deepseek retry finish_reason={finish_reason2} len={len(text2)}",
+                flush=True,
+            )
+            if text2:
+                return text2
+        return text
+    # GPT：优先 Responses API，失败回退 Chat
+    client = _get_gpt_client()
+    try:
+        resp = client.responses.create(
+            model=_MODEL,
+            input=[
+                {"role": m["role"],
+                 "content": [{"type": "input_text", "text": m["content"]}]}
+                for m in messages
+            ],
+        )
+        status = getattr(resp, "status", "")
+        text = ""
+        try:
+            text = (resp.output[0].content[0].text or "").strip()
+        except Exception:
+            text = ""
+        print(
+            f"[LLM] backend=gpt-responses model={_MODEL} status={status} "
+            f"len={len(text)} max_tokens={max_tokens}",
+            flush=True,
+        )
+        if _is_potentially_truncated_json(text):
+            retry_tokens = min(max_tokens + 220, 1400)
+            print(
+                f"[LLM] gpt responses 返回疑似截断/空串，改用 chat 重试 max_tokens={retry_tokens}",
+                flush=True,
+            )
+            resp2 = client.chat.completions.create(
+                model=_MODEL, messages=messages, stream=False,
+                temperature=0.1, max_tokens=retry_tokens,
+            )
+            finish_reason2 = getattr(resp2.choices[0], "finish_reason", "")
+            text2 = (resp2.choices[0].message.content or "").strip()
+            print(
+                f"[LLM] gpt chat retry finish_reason={finish_reason2} len={len(text2)}",
+                flush=True,
+            )
+            if text2:
+                return text2
+        return text
+    except Exception as exc:
+        print(f"[LLM] gpt responses 失败，回退 chat: {exc}", flush=True)
+        resp = client.chat.completions.create(
+            model=_MODEL, messages=messages, stream=False,
+            temperature=0.1, max_tokens=max_tokens,
+        )
+        finish_reason = getattr(resp.choices[0], "finish_reason", "")
+        text = (resp.choices[0].message.content or "").strip()
+        print(
+            f"[LLM] backend=gpt-chat model={_MODEL} finish_reason={finish_reason} "
+            f"len={len(text)} max_tokens={max_tokens}",
+            flush=True,
+        )
+        if _is_potentially_truncated_json(text):
+            retry_tokens = min(max_tokens + 220, 1400)
+            print(
+                f"[LLM] gpt chat 返回疑似截断/空串，重试一次 max_tokens={retry_tokens}",
+                flush=True,
+            )
+            resp2 = client.chat.completions.create(
+                model=_MODEL, messages=messages, stream=False,
+                temperature=0.1, max_tokens=retry_tokens,
+            )
+            finish_reason2 = getattr(resp2.choices[0], "finish_reason", "")
+            text2 = (resp2.choices[0].message.content or "").strip()
+            print(
+                f"[LLM] gpt chat retry finish_reason={finish_reason2} len={len(text2)}",
+                flush=True,
+            )
+            if text2:
+                return text2
+        return text
+
+
+def _debug_preview(text: str, limit: int = 220) -> str:
+    """调试日志预览：压缩换行并截断，避免日志过长。"""
+    if text is None:
+        return ""
+    one_line = " ".join(str(text).split())
+    return one_line[:limit] + ("..." if len(one_line) > limit else "")
+
+
+def _is_potentially_truncated_json(text: str) -> bool:
+    """粗略判断返回是否像被截断的 JSON。"""
+    if not text:
+        return True
+    cleaned = text.strip()
+    if not cleaned:
+        return True
+    if cleaned.startswith("{") and not cleaned.endswith("}"):
+        return True
+    if cleaned.startswith("[") and not cleaned.endswith("]"):
+        return True
+    return False
+
+
+def _parse_sentiment_json(raw: str) -> dict:
+    """从 LLM 回复中提取结构化结果，优先 JSON，失败时退化为文本提取。"""
+    import re as _re
+
+    def _normalize_result(result: dict) -> dict:
+        # 兼容新旧字段命名，避免前端因字段缺失只显示新闻评分
+        return {
+            "sentiment": result.get("sentiment", "中性"),
+            "score": round(float(result.get("score", 0.0)), 2),
+            "reason": result.get("reason", ""),
+            "news_summary_text": result.get(
+                "news_summary_text",
+                result.get("news_summary", result.get("key_news_events", "")),
+            ),
+            "technical_analysis": result.get(
+                "technical_analysis",
+                result.get("tech_analysis", result.get("technical_brief", "")),
+            ),
+            "fund_flow_analysis": result.get(
+                "fund_flow_analysis",
+                result.get("funds_and_sentiment", ""),
+            ),
+            "industry_logic_status": result.get("industry_logic_status", ""),
+            "industry_logic_reason": result.get("industry_logic_reason", ""),
+            "trading_logic_status": result.get("trading_logic_status", ""),
+            "trading_logic_reason": result.get("trading_logic_reason", ""),
+            "scenario_strong": result.get("scenario_strong", ""),
+            "scenario_mid": result.get("scenario_mid", ""),
+            "scenario_weak": result.get("scenario_weak", ""),
+            "impact_score": str(result.get("impact_score", "")),
+            "confidence": result.get("confidence", ""),
+            "confidence_reason": result.get("confidence_reason", ""),
+            "one_line_conclusion": result.get("one_line_conclusion", ""),
+            "tech_alignment": result.get(
+                "tech_alignment",
+                result.get("market_tech_alignment", ""),
+            ),
+            "conclusion": result.get(
+                "conclusion",
+                result.get("final_judgement", result.get("risk_and_judgement", "")),
+            ),
+        }
+
+    print(f"[解析-综合] 原始返回预览: {_debug_preview(raw)}", flush=True)
+
+    # 1) 清理 markdown 代码块
+    cleaned = raw.strip()
+    cleaned = _re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = _re.sub(r"\s*```$", "", cleaned)
+
+    # 2) 优先尝试直接解析完整文本
+    for candidate in (cleaned,):
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                print("[解析-综合] 命中路径: 直接 JSON 解析成功", flush=True)
+                return _normalize_result(obj)
+        except Exception:
+            pass
+
+    # 3) 再尝试提取最外层 JSON 片段
+    m = _re.search(r"\{[\s\S]*\}", cleaned)
+    if m:
+        frag = m.group()
+        try:
+            obj = json.loads(frag)
+            if isinstance(obj, dict):
+                print("[解析-综合] 命中路径: JSON 片段提取解析成功", flush=True)
+                return _normalize_result(obj)
+        except Exception:
+            pass
+
+    # 4) JSON 失败：从文本中做最小可用提取，尽量填充前端区块
+    def _pick(pattern: str, default: str = "") -> str:
+        mm = _re.search(pattern, cleaned, _re.I | _re.M)
+        if not mm:
+            return default
+        return (mm.group(1) or "").strip()
+
+    score_txt = _pick(r"score\s*[:：]\s*(-?\d+(?:\.\d+)?)", "0")
+    try:
+        score = round(float(score_txt), 2)
+    except Exception:
+        score = 0.0
+
+    sentiment = _pick(r"sentiment\s*[:：]\s*(正面|负面|中性)", "")
+    if not sentiment:
+        sentiment = "正面" if score > 0.1 else ("负面" if score < -0.1 else "中性")
+
+    # 按新版结构标题抓取段落
+    news_summary_text = _pick(r"(?:今日关键新闻与事件|关键新闻与事件)\s*[:：]\s*(.+)")
+    technical_analysis = _pick(r"(?:技术面简析|技术面分析)\s*[:：]\s*(.+)")
+    fund_flow_analysis = _pick(r"(?:资金与情绪面|资金面分析)\s*[:：]\s*(.+)")
+    conclusion = _pick(r"(?:综合判断与风险提示|综合结论|结论)\s*[:：]\s*(.+)")
+    one_line_conclusion = _pick(r"(?:一句话结论|one_line_conclusion)\s*[:：]\s*(.+)")
+
+    # 如果标题提取不到，退化为前几行摘要（避免把半截 JSON 当成结论）
+    lines = [ln.strip("-* \t") for ln in cleaned.splitlines() if ln.strip()]
+    first_line = lines[0] if lines else ""
+    second_line = lines[1] if len(lines) > 1 else ""
+    looks_like_json_fragment = first_line.startswith("{") or first_line.startswith('"')
+    if not one_line_conclusion and lines and not looks_like_json_fragment:
+        one_line_conclusion = lines[0][:100]
+    if not conclusion and len(lines) > 1 and not second_line.startswith('"'):
+        conclusion = lines[1][:140]
+
+    print("[解析-综合] 命中路径: 文本降级提取", flush=True)
+    result = {
+        "sentiment": sentiment,
+        "score": score,
+        "reason": "非标准 JSON，已按文本降级提取",
+        "news_summary_text": news_summary_text,
+        "technical_analysis": technical_analysis,
+        "fund_flow_analysis": fund_flow_analysis,
+        "industry_logic_status": "",
+        "industry_logic_reason": "",
+        "trading_logic_status": "",
+        "trading_logic_reason": "",
+        "scenario_strong": "",
+        "scenario_mid": "",
+        "scenario_weak": "",
+        "impact_score": "",
+        "confidence": "",
+        "confidence_reason": "",
+        "one_line_conclusion": one_line_conclusion,
+        "tech_alignment": "",
+        "conclusion": conclusion,
+    }
+    print(
+        "[解析-综合] 降级结果字段: "
+        f"sentiment={result['sentiment']} score={result['score']} "
+        f"news_summary_text={'Y' if bool(result['news_summary_text']) else 'N'} "
+        f"technical_analysis={'Y' if bool(result['technical_analysis']) else 'N'} "
+        f"fund_flow_analysis={'Y' if bool(result['fund_flow_analysis']) else 'N'} "
+        f"conclusion={'Y' if bool(result['conclusion']) else 'N'}",
+        flush=True,
+    )
+    return result
+
+
+def _parse_news_sentiment_json(raw: str) -> dict:
+    """单条新闻专用解析器，避免误把半截 JSON 注入综合字段。"""
+    import re as _re
+    cleaned = raw.strip()
+    cleaned = _re.sub(r"^```(?:json)?\s*", "", cleaned)
+    cleaned = _re.sub(r"\s*```$", "", cleaned)
+
+    # 直接 JSON
+    try:
+        obj = json.loads(cleaned)
+        if isinstance(obj, dict):
+            sentiment = obj.get("sentiment", "中性")
+            score = round(float(obj.get("score", 0.0)), 2)
+            reason = str(obj.get("reason", "")).strip()
+            if sentiment not in {"正面", "负面", "中性"}:
+                sentiment = "正面" if score > 0.1 else ("负面" if score < -0.1 else "中性")
+            return {"sentiment": sentiment, "score": score, "reason": reason}
+    except Exception:
+        pass
+
+    # JSON 片段
+    m = _re.search(r"\{[\s\S]*\}", cleaned)
+    if m:
+        try:
+            obj = json.loads(m.group())
+            if isinstance(obj, dict):
+                sentiment = obj.get("sentiment", "中性")
+                score = round(float(obj.get("score", 0.0)), 2)
+                reason = str(obj.get("reason", "")).strip()
+                if sentiment not in {"正面", "负面", "中性"}:
+                    sentiment = "正面" if score > 0.1 else ("负面" if score < -0.1 else "中性")
+                return {"sentiment": sentiment, "score": score, "reason": reason}
+        except Exception:
+            pass
+
+    # 文本兜底（只保留最小字段）
+    mm_score = _re.search(r"score\s*[:：]\s*(-?\d+(?:\.\d+)?)", cleaned, _re.I)
+    mm_sent = _re.search(r"sentiment\s*[:：]\s*(正面|负面|中性)", cleaned, _re.I)
+    score = round(float(mm_score.group(1)), 2) if mm_score else 0.0
+    sentiment = mm_sent.group(1) if mm_sent else ("正面" if score > 0.1 else ("负面" if score < -0.1 else "中性"))
+    return {"sentiment": sentiment, "score": score, "reason": "新闻情绪解析降级"}
+
+
+def _merge_non_empty(base: dict, patch: dict) -> dict:
+    """将 patch 的非空字段合并进 base。"""
+    out = dict(base)
+    for k, v in (patch or {}).items():
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        out[k] = v
+    return out
+
+
+def _fetch_stock_news(keyword: str, num: int = 8) -> list:
+    """
+    从东方财富抓取个股相关新闻（与 01/scanner/news_fetcher.py 逻辑相同）。
+    返回 [{"title": str, "published": str, "source": str}, ...]
+    失败时返回空列表。
+    """
+    import time as _time
+    import urllib.parse as _up
+
+    try:
+        from curl_cffi import requests as _cffi
+        param_data = {
+            "uid": "", "keyword": keyword,
+            "type": ["cmsArticleWebOld"],
+            "client": "web", "clientType": "web", "clientVersion": "curr",
+            "param": {"cmsArticleWebOld": {"from": 0, "size": num, "oneImageFlow": True}},
+        }
+        params = {
+            "param": json.dumps(param_data, ensure_ascii=False),
+            "cb": "cb",
+            "_": str(int(_time.time() * 1000)),
+        }
+        resp = _cffi.get(
+            "https://search-api-web.eastmoney.com/search/jsonp",
+            params=params,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0",
+                "Referer": "https://www.eastmoney.com/",
+            },
+            timeout=10,
+            impersonate="chrome120",
+        )
+        import re as _re2
+        match = _re2.search(r"\((.+)\)\s*$", resp.text, _re2.DOTALL)
+        if match:
+            data = json.loads(match.group(1))
+            raw_list = data.get("result", {}).get("cmsArticleWebOld", [])
+            items = raw_list if isinstance(raw_list, list) else raw_list.get("data", [])
+            return [
+                {
+                    "title":     item.get("title", "").strip(),
+                    "published": item.get("date", ""),
+                    "source":    "东方财富",
+                }
+                for item in items if item.get("title")
+            ][:num]
+    except Exception as exc:
+        print(f"[新闻] 抓取失败({keyword}): {exc}", flush=True)
+    return []
+
+
+def _analyze_single_news(title: str) -> dict:
+    """对单条新闻标题做情绪分析（与 01/scanner/sentiment.py 完全一致）。"""
+    if not title.strip():
+        return {"sentiment": "中性", "score": 0.0, "reason": ""}
+    try:
+        raw = _llm_call([
+            {"role": "system", "content": _NEWS_SENTIMENT_SYSTEM},
+            {"role": "user",   "content": f"新闻：{title}"},
+        ], max_tokens=300)
+        result = _parse_news_sentiment_json(raw)
+        print(
+            "[解析-新闻] "
+            f"title={_debug_preview(title, 36)} "
+            f"sentiment={result.get('sentiment')} "
+            f"score={result.get('score')} "
+            f"reason={_debug_preview(result.get('reason', ''), 60)}",
+            flush=True,
+        )
+        return result
+    except Exception as exc:
+        print(f"[LLM-新闻情绪] 分析失败: {exc}", flush=True)
+        return {"sentiment": "中性", "score": 0.0, "reason": "分析失败"}
+
+
+def analyze_stock_sentiment(
+    code: str,
+    stock_data: dict,
+    selector_type: str = "long",
+    num_news: int = 8,
+) -> dict:
+    """
+    仿 01-News_Sentiment_Scanner 完整流程，对单只股票做综合情绪分析：
+      1. 用股票名称抓取相关新闻
+      2. 逐条调用 LLM 分析新闻情绪（与 01 sentiment.py 相同 prompt）
+      3. 汇总新闻情绪分布
+      4. 结合技术指标/资金流/评分，调用 LLM 生成综合情绪结论
+
+    返回：
+        {
+          "sentiment": "正面|负面|中性",
+          "score": float,
+          "reason": str,
+          "news_score": float,          # 新闻平均分
+          "news_summary": {"正面":n, "负面":n, "中性":n},
+          "articles": [{"title", "published", "sentiment", "score", "reason"}, ...]
+        }
+    """
+    s = stock_data
+    name = s.get("name") or code
+    ti = s.get("tech_indicators") or {}
+    ff = s.get("fund_flow") or {}
+    mode = "短线（1~5日）" if selector_type == "short" else "中长线（1~3月）"
+
+    # ── Step 1: 抓新闻 ────────────────────────────────────────────────────────
+    print(f"[情绪分析] {code} {name} 正在抓取新闻…", flush=True)
+    articles = _fetch_stock_news(name, num_news)
+    if not articles:
+        # 备用：用股票代码再搜一次
+        articles = _fetch_stock_news(code, num_news)
+    print(f"[情绪分析] {code} 获取到 {len(articles)} 条新闻", flush=True)
+
+    # ── Step 2: 逐条情绪分析（与 01 完全一致）────────────────────────────────
+    news_summary = {"正面": 0, "负面": 0, "中性": 0}
+    analyzed_articles = []
+    scores = []
+    for art in articles:
+        result = _analyze_single_news(art["title"])
+        label = result["sentiment"]
+        news_summary[label] = news_summary.get(label, 0) + 1
+        scores.append(result["score"])
+        analyzed_articles.append({**art, **result})
+        arrow = "▲" if label == "正面" else ("▼" if label == "负面" else "■")
+        print(f"  [{arrow} {label}  {result['score']:+.2f}] {art['title'][:40]}", flush=True)
+
+    news_score = round(sum(scores) / len(scores), 2) if scores else 0.0
+    print(f"[情绪分析] {code} 新闻均分={news_score}  分布={news_summary}", flush=True)
+
+    # ── Step 3: 综合情绪（新闻 + 技术指标）──────────────────────────────────
+    tech_summary = (
+        f"现价：{s.get('price')}  涨跌幅：{s.get('change_pct')}%\n"
+        f"RSI：{ti.get('rsi')}  MACD柱：{ti.get('macd')}  "
+        f"KDJ-K：{ti.get('kdj_k')}  布林上轨：{ti.get('boll_upper')} 下轨：{ti.get('boll_lower')}\n"
+        f"主力净流入：{ff.get('main_net_inflow')}元  连续：{ff.get('days_continuous')}天\n"
+        f"选股评分：{s.get('selector_score')}  评级：{s.get('selector_rating')}  "
+        f"策略：{mode}"
+    )
+    combined_msg = (
+        f"股票：{code} {name}\n\n"
+        f"【新闻情绪汇总】共{len(articles)}条  "
+        f"正面{news_summary['正面']}条 负面{news_summary['负面']}条 中性{news_summary['中性']}条  "
+        f"新闻平均分：{news_score:+.2f}\n\n"
+        f"【技术指标与评分】\n{tech_summary}"
+    )
+    print(
+        f"[LLM-综合情绪] {code} 提示词用户输入预览: {_debug_preview(combined_msg, 420)}",
+        flush=True,
+    )
+    try:
+        # A) 新闻与总体情绪
+        msg_news = (
+            f"股票：{code} {name}\n"
+            f"新闻汇总：正面{news_summary['正面']} 负面{news_summary['负面']} 中性{news_summary['中性']} "
+            f"新闻均分={news_score:+.2f}\n"
+            f"新闻标题列表：\n" + "\n".join([f"- {a.get('title', '')}" for a in analyzed_articles[:8]])
+        )
+        raw_news = _llm_call(
+            [
+                {"role": "system", "content": _STOCK_PROMPT_NEWS},
+                {"role": "user", "content": msg_news},
+            ],
+            max_tokens=700,
+        )
+        print(f"[LLM-综合情绪] {code} 分段A原始预览: {_debug_preview(raw_news, 280)}", flush=True)
+        part_news = _parse_sentiment_json(raw_news)
+
+        # B) 技术与资金
+        msg_tech_fund = (
+            f"股票：{code} {name}\n"
+            f"{tech_summary}\n"
+            "请输出技术面简析 + 资金与情绪面 + 技术一致性简评。"
+        )
+        raw_tech = _llm_call(
+            [
+                {"role": "system", "content": _STOCK_PROMPT_TECH_FUND},
+                {"role": "user", "content": msg_tech_fund},
+            ],
+            max_tokens=760,
+        )
+        print(f"[LLM-综合情绪] {code} 分段B原始预览: {_debug_preview(raw_tech, 280)}", flush=True)
+        part_tech = _parse_sentiment_json(raw_tech)
+
+        # C) 判断、情景与风险
+        msg_decision = (
+            f"股票：{code} {name}\n"
+            f"已知情绪结论：sentiment={part_news.get('sentiment')} score={part_news.get('score')} "
+            f"reason={part_news.get('reason')}\n"
+            f"已知技术结论：{part_tech.get('technical_analysis', '')}\n"
+            f"已知资金结论：{part_tech.get('fund_flow_analysis', '')}\n"
+            "请给出短期1-3日综合判断、风险提示与三情景。"
+        )
+        raw_decision = _llm_call(
+            [
+                {"role": "system", "content": _STOCK_PROMPT_DECISION},
+                {"role": "user", "content": msg_decision},
+            ],
+            max_tokens=900,
+        )
+        print(f"[LLM-综合情绪] {code} 分段C原始预览: {_debug_preview(raw_decision, 280)}", flush=True)
+        part_decision = _parse_sentiment_json(raw_decision)
+
+        # 合并分段结果
+        overall = {}
+        overall = _merge_non_empty(overall, part_news)
+        overall = _merge_non_empty(overall, part_tech)
+        overall = _merge_non_empty(overall, part_decision)
+
+        # 保证基础情绪字段存在
+        if not overall.get("sentiment"):
+            overall["sentiment"] = "正面" if news_score > 0.1 else ("负面" if news_score < -0.1 else "中性")
+        if overall.get("score", 0.0) == 0.0 and news_score != 0.0:
+            overall["score"] = news_score
+        if not overall.get("reason"):
+            overall["reason"] = f"综合分析部分降级，参考新闻均分 {news_score:+.2f}"
+
+        print(
+            f"[LLM-综合情绪] {code} 解析后: "
+            f"sentiment={overall.get('sentiment')} score={overall.get('score')} "
+            f"reason={_debug_preview(overall.get('reason', ''), 70)} "
+            f"news_summary_text={'Y' if bool(overall.get('news_summary_text')) else 'N'} "
+            f"technical_analysis={'Y' if bool(overall.get('technical_analysis')) else 'N'} "
+            f"fund_flow_analysis={'Y' if bool(overall.get('fund_flow_analysis')) else 'N'} "
+            f"conclusion={'Y' if bool(overall.get('conclusion')) else 'N'}",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"[LLM-综合情绪] {code} 失败: {exc}", flush=True)
+        # 降级：直接用新闻分
+        overall = {
+            "sentiment": "正面" if news_score > 0.1 else ("负面" if news_score < -0.1 else "中性"),
+            "score": news_score,
+            "reason": f"新闻均分 {news_score:+.2f}，技术分析暂不可用",
+            "news_summary_text": "",
+            "technical_analysis": "",
+            "fund_flow_analysis": "",
+            "industry_logic_status": "数据不足",
+            "industry_logic_reason": "综合分析失败，无法判定",
+            "trading_logic_status": "数据不足",
+            "trading_logic_reason": "综合分析失败，无法判定",
+            "scenario_strong": "",
+            "scenario_mid": "",
+            "scenario_weak": "",
+            "impact_score": "",
+            "confidence": "低",
+            "confidence_reason": "综合分析调用失败，降级为新闻均分",
+            "one_line_conclusion": f"{code} {name}：中性 — 观望",
+            "tech_alignment": "",
+            "conclusion": f"新闻均分 {news_score:+.2f}，技术分析暂不可用",
+        }
+        print(f"[LLM-综合情绪] {code} 触发异常降级，使用新闻均分回退", flush=True)
+
+    final_result = {
+        "sentiment":    overall["sentiment"],
+        "score":        overall["score"],
+        "reason":       overall["reason"],
+        "news_summary_text": overall.get("news_summary_text", ""),
+        "technical_analysis": overall.get("technical_analysis", ""),
+        "fund_flow_analysis": overall.get("fund_flow_analysis", ""),
+        "industry_logic_status": overall.get("industry_logic_status", ""),
+        "industry_logic_reason": overall.get("industry_logic_reason", ""),
+        "trading_logic_status": overall.get("trading_logic_status", ""),
+        "trading_logic_reason": overall.get("trading_logic_reason", ""),
+        "scenario_strong": overall.get("scenario_strong", ""),
+        "scenario_mid": overall.get("scenario_mid", ""),
+        "scenario_weak": overall.get("scenario_weak", ""),
+        "impact_score": overall.get("impact_score", ""),
+        "confidence": overall.get("confidence", ""),
+        "confidence_reason": overall.get("confidence_reason", ""),
+        "one_line_conclusion": overall.get("one_line_conclusion", ""),
+        "tech_alignment": overall.get("tech_alignment", ""),
+        "conclusion": overall.get("conclusion", ""),
+        "news_score":   news_score,
+        "news_summary": news_summary,
+        "articles":     analyzed_articles,
+    }
+    print(
+        f"[LLM-综合情绪] {code} 最终返回: "
+        f"sentiment={final_result['sentiment']} score={final_result['score']} "
+        f"news_score={final_result['news_score']} articles={len(final_result['articles'])}",
+        flush=True,
+    )
+    return final_result
+
+
 if __name__ == "__main__":
     test_connection()

@@ -205,26 +205,39 @@ def index():
 
 
 # ── 选股 API ─────────────────────────────────────────────────────────────────
+_UNIVERSE_MAP = {
+    'hs300':    '000300',   # 沪深300
+    'zz500':    '000905',   # 中证500
+    'gem_star': 'gem_star', # 创业板+科创板
+}
+
+
+def _resolve_index_code(universe: str) -> str:
+    """将前端 universe 值转为后端 index_code"""
+    return _UNIVERSE_MAP.get(universe or 'hs300', '000300')
+
+
 @app.route('/api/selector/run', methods=['POST'])
 def api_run_selector():
     """
     运行选股器
-    请求体: {"type": "short|long|enhanced", "top_n": 5}
+    请求体: {"type": "short|long|enhanced", "top_n": 5, "universe": "hs300|zz500|gem_star"}
     """
     data = request.json or {}
     selector_type = data.get('type', 'long')
     top_n = int(data.get('top_n', 5))
+    index_code = _resolve_index_code(data.get('universe', 'hs300'))
 
     try:
         if selector_type == 'short':
             from short_term_selector import ShortTermSelector
-            selector = ShortTermSelector()
+            selector = ShortTermSelector(index_code=index_code)
         elif selector_type == 'enhanced':
             from enhanced_long_term_selector import EnhancedLongTermSelector
-            selector = EnhancedLongTermSelector()
+            selector = EnhancedLongTermSelector(index_code=index_code)
         else:
             from long_term_selector import LongTermSelector
-            selector = LongTermSelector()
+            selector = LongTermSelector(index_code=index_code)
 
         stocks = selector.select_top_stocks(top_n=top_n)
         selector.close()
@@ -246,11 +259,12 @@ def api_run_selector():
 def api_get_selector_report():
     """
     生成选股文字报告
-    请求体: {"type": "short|long|enhanced", "stocks": [...]}
+    请求体: {"type": "short|long|enhanced", "stocks": [...], "universe": "hs300|zz500|gem_star"}
     """
     data = request.json or {}
     selector_type = data.get('type', 'long')
     stocks = data.get('stocks', [])
+    index_code = _resolve_index_code(data.get('universe', 'hs300'))
 
     if not stocks:
         return jsonify({'status': 'error', 'message': '无数据'})
@@ -258,13 +272,13 @@ def api_get_selector_report():
     try:
         if selector_type == 'short':
             from short_term_selector import ShortTermSelector
-            selector = ShortTermSelector()
+            selector = ShortTermSelector(index_code=index_code)
         elif selector_type == 'enhanced':
             from enhanced_long_term_selector import EnhancedLongTermSelector
-            selector = EnhancedLongTermSelector()
+            selector = EnhancedLongTermSelector(index_code=index_code)
         else:
             from long_term_selector import LongTermSelector
-            selector = LongTermSelector()
+            selector = LongTermSelector(index_code=index_code)
 
         report = selector.generate_report(stocks)
         selector.close()
@@ -288,6 +302,7 @@ def api_gpt_analyze():
     data = request.json or {}
     stocks = data.get('stocks')
     selector_type = data.get('type', 'long')
+    index_code = _resolve_index_code(data.get('universe', 'hs300'))
 
     # 若未传 stocks，先运行选股器
     if not stocks:
@@ -295,13 +310,13 @@ def api_gpt_analyze():
         try:
             if selector_type == 'short':
                 from short_term_selector import ShortTermSelector
-                selector = ShortTermSelector()
+                selector = ShortTermSelector(index_code=index_code)
             elif selector_type == 'enhanced':
                 from enhanced_long_term_selector import EnhancedLongTermSelector
-                selector = EnhancedLongTermSelector()
+                selector = EnhancedLongTermSelector(index_code=index_code)
             else:
                 from long_term_selector import LongTermSelector
-                selector = LongTermSelector()
+                selector = LongTermSelector(index_code=index_code)
             stocks = selector.select_top_stocks(top_n=top_n)
             selector.close()
         except Exception as e:
@@ -554,13 +569,16 @@ def api_gpt_analyze():
     try:
         from llm_analyst import run_single_analysis
         if use_stream:
+            import json as _json
             def generate():
                 for entry in stocks_data:
-                    yield from run_single_analysis(
+                    for chunk in run_single_analysis(
                         entry['code'], sentiment, entry,
                         stream=True, selector_type=selector_type
-                    )
-            return Response(stream_with_context(generate()), content_type='text/plain; charset=utf-8')
+                    ):
+                        yield f"data: {_json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+            return Response(stream_with_context(generate()), content_type='text/event-stream; charset=utf-8')
         else:
             reports = []
             for entry in stocks_data:
@@ -572,6 +590,65 @@ def api_gpt_analyze():
                 )
             report = '\n\n---\n\n'.join(reports)
             return jsonify({'status': 'success', 'report': report})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'status': 'error', 'message': str(e)})
+
+
+@app.route('/api/selector/sentiment', methods=['POST'])
+def api_sentiment_analyze():
+    """
+    对单只股票做新闻 + 技术指标综合情绪分析（仿 01-News_Sentiment_Scanner 流程）。
+    请求体: {"stock": {...}, "type": "short|long|enhanced"}
+    返回:
+      {
+        "status": "success",
+        "sentiment": "正面|负面|中性",
+        "score": float,
+        "reason": str,
+        "news_score": float,
+        "news_summary": {"正面": n, "负面": n, "中性": n},
+        "articles": [{"title", "published", "sentiment", "score", "reason"}, ...]
+      }
+    """
+    data = request.json or {}
+    stock = data.get('stock') or {}
+    selector_type = data.get('type', 'long')
+
+    if not stock or not stock.get('code'):
+        return jsonify({'status': 'error', 'message': '缺少 stock.code'})
+
+    try:
+        from llm_analyst import analyze_stock_sentiment
+        result = analyze_stock_sentiment(
+            code=stock['code'],
+            stock_data=stock,
+            selector_type=selector_type,
+        )
+        return jsonify({'status': 'success',
+                        'sentiment':        result['sentiment'],
+                        'score':            result['score'],
+                        'reason':           result.get('reason', ''),
+                        'news_summary_text':result.get('news_summary_text', ''),
+                        'technical_analysis': result.get('technical_analysis', ''),
+                        'fund_flow_analysis': result.get('fund_flow_analysis', ''),
+                        'industry_logic_status': result.get('industry_logic_status', ''),
+                        'industry_logic_reason': result.get('industry_logic_reason', ''),
+                        'trading_logic_status': result.get('trading_logic_status', ''),
+                        'trading_logic_reason': result.get('trading_logic_reason', ''),
+                        'scenario_strong': result.get('scenario_strong', ''),
+                        'scenario_mid': result.get('scenario_mid', ''),
+                        'scenario_weak': result.get('scenario_weak', ''),
+                        'impact_score': result.get('impact_score', ''),
+                        'confidence': result.get('confidence', ''),
+                        'confidence_reason': result.get('confidence_reason', ''),
+                        'one_line_conclusion': result.get('one_line_conclusion', ''),
+                        'tech_alignment':   result.get('tech_alignment', ''),
+                        'conclusion':       result.get('conclusion', ''),
+                        'news_score':       result['news_score'],
+                        'news_summary':     result['news_summary'],
+                        'articles':         result['articles']})
     except Exception as e:
         import traceback
         traceback.print_exc()

@@ -4,12 +4,11 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>AI 选股神器</title>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500&display=swap" rel="stylesheet">
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- 避免外链资源阻塞首屏：字体与渲染依赖均使用本地可用方案 -->
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
     body{
-      font-family:'Noto Sans SC','Segoe UI',sans-serif;
+      font-family:'Microsoft YaHei','PingFang SC','Noto Sans SC','Segoe UI',sans-serif;
       background: linear-gradient(135deg, #fdf6f9 0%, #f0eaf8 50%, #e8f0fb 100%);
       color:#4a3f5c;min-height:100vh;font-weight:300
     }
@@ -106,7 +105,7 @@
       border-radius:12px;
       padding:16px;font-size:.81rem;
       white-space:pre-wrap;max-height:420px;overflow-y:auto;
-      font-family:'Noto Sans SC',sans-serif;
+      font-family:'Microsoft YaHei','PingFang SC','Noto Sans SC',sans-serif;
       line-height:1.7;color:#5a4a72
     }
     ::-webkit-scrollbar{width:5px;height:5px}
@@ -124,6 +123,14 @@
     .tag-short{background:#fce4f0;color:#c2547a}
     .tag-long{background:#e4eeff;color:#5578c2}
     .tag-enh{background:#fef3e2;color:#c28840}
+    .universe-hint{
+      display:inline-flex;align-items:center;gap:4px;
+      padding:4px 10px;border-radius:10px;font-size:.76rem;font-weight:500;
+      transition:opacity .2s,background .2s
+    }
+    .hint-long{background:#e4eeff;color:#5578c2;border:1px solid #c0d0f0}
+    .hint-short{background:#fce4f0;color:#c2547a;border:1px solid #f0c8d8}
+    .hint-all{background:#f0f8e8;color:#5a8840;border:1px solid #c8e0b0}
     details summary{cursor:pointer;font-size:.88rem;font-weight:500;color:#b06db8;list-style:none;display:flex;align-items:center;gap:6px;user-select:none}
     details summary::before{content:'▶';font-size:.7rem;transition:transform .2s}
     details[open] summary::before{transform:rotate(90deg)}
@@ -144,6 +151,49 @@
       animation:fadeIn .25s ease
     }
     @keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+    /* 情绪卡片 */
+    .sentiment-card{
+      background:rgba(240,234,248,.45);
+      border:1px solid #e0d0ea;border-radius:14px;
+      padding:16px 20px;
+    }
+    .sentiment-header{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+    .sentiment-badge{
+      padding:5px 14px;border-radius:12px;font-size:.92rem;font-weight:600
+    }
+    .sentiment-pos{background:#e6f4ea;color:#1e7e34}
+    .sentiment-neg{background:#f4e6e6;color:#9e2a2a}
+    .sentiment-neu{background:#f0edf4;color:#7a6090}
+    .sentiment-score{font-size:1.05rem;font-weight:600;color:#5a4a72}
+    .sentiment-reason{font-size:.84rem;color:#7a6090;margin-bottom:14px}
+    .news-summary{
+      display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;font-size:.78rem
+    }
+    .news-summary span{padding:3px 10px;border-radius:8px;font-weight:500}
+    .ns-pos{background:#e6f4ea;color:#1e7e34}
+    .ns-neg{background:#f4e6e6;color:#9e2a2a}
+    .ns-neu{background:#f0edf4;color:#7a6090}
+    .ns-avg{background:#eae8f5;color:#5578c2}
+    .news-list{list-style:none;padding:0;margin:0}
+    .news-list li{
+      display:flex;align-items:flex-start;gap:8px;
+      padding:7px 0;border-bottom:1px solid #f0e8f2;font-size:.81rem;color:#5a4a72
+    }
+    .news-list li:last-child{border-bottom:none}
+    .news-arrow{font-size:.8rem;min-width:18px;font-weight:600}
+    .news-arrow.pos{color:#1e7e34}
+    .news-arrow.neg{color:#9e2a2a}
+    .news-arrow.neu{color:#9a94a8}
+    .news-meta{font-size:.74rem;color:#a08ab8;margin-top:2px}
+    .analysis-block{
+      background:rgba(243,234,248,.4);
+      border-radius:10px;padding:10px 14px;
+      margin-bottom:10px;border:1px solid #ead8f0
+    }
+    .conclusion-block{background:rgba(230,244,234,.5);border-color:#c8e0b0}
+    .analysis-label{font-size:.76rem;font-weight:500;color:#b06db8;margin-bottom:4px}
+    .conclusion-block .analysis-label{color:#3a7a50}
+    .analysis-text{font-size:.84rem;color:#5a4a72;line-height:1.6}
     /* Markdown 研报渲染样式 */
     .llm-report{
       background:rgba(240,234,248,.4);
@@ -186,9 +236,7 @@
       background:rgba(200,148,212,.07);
       border-radius:0 8px 8px 0;color:#7a6090
     }
-    .llm-report table{border-collapse:collapse;width:100%;margin:.
-      
-      0;font-size:.84rem}
+    .llm-report table{border-collapse:collapse;width:100%;margin:.6em 0;font-size:.84rem}
     .llm-report th{background:linear-gradient(90deg,#f3eaf8,#eae8f5);padding:8px 10px;color:#8a6fa8;font-weight:500;border:1px solid #d8c5e0}
     .llm-report td{padding:7px 10px;border:1px solid #e8d8f0;color:#5a4a72}
     .llm-report tr:hover td{background:rgba(240,234,248,.5)}
@@ -207,6 +255,13 @@
   <div class="card" style="margin-bottom:20px">
     <h3>✨ 运行选股</h3>
     <div class="ctrl-row">
+      <label>选股类型</label>
+      <select id="sel-universe" onchange="updateUniverseHint()">
+        <option value="hs300">沪深 300</option>
+        <option value="zz500">中证 500</option>
+        <option value="gem_star">创业板/科创板</option>
+      </select>
+      <span id="universe-hint" class="universe-hint hint-long" title="基于该指数特征的策略推荐，不限制选择">💡 推荐长线 / 增强版</span>
       <select id="sel-type">
         <option value="long">中长线（综合评分）</option>
         <option value="short">短线（动量信号）</option>
@@ -240,8 +295,8 @@
     <details>
       <summary>📖 使用说明</summary>
       <ol class="step-list">
-        <li>从下拉框选择策略类型：<span class="tag tag-short">短线</span><span class="tag tag-long">中长线</span><span class="tag tag-enh">增强版</span>，填写推荐数量（默认5只）。</li>
-        <li>点击 <strong>▶ 运行</strong>，系统自动扫描沪深300成分股（约250只主板蓝筹），根据历史K线计算技术指标并评分，完成后显示评分最高的 N 只。</li>
+        <li>选择<strong>选股类型</strong>（<strong>沪深300</strong> / <strong>中证500</strong> / <strong>创业板/科创板</strong>），再选策略：<span class="tag tag-short">短线</span><span class="tag tag-long">中长线</span><span class="tag tag-enh">增强版</span>，填写推荐数量（默认5只）。</li>
+        <li>点击 <strong>▶ 运行</strong>，系统自动扫描所选指数成分股，根据历史K线计算技术指标并评分，完成后显示评分最高的 N 只。</li>
         <li>点击 <strong>📄 报告</strong>，生成本次选股的文字摘要，包含每只股票的信号说明和操作建议。</li>
         <li>点击每行末尾的 <strong>🤖 AI研报</strong>，针对该股单独调用 LLM 生成研读报告，包含产业逻辑、三情景价格、买入/止损/止盈建议，支持流式实时输出；再次点击可收起。</li>
         <li>表格中的<strong>买入信号 / 止损价 / 止盈价</strong>说明：买入信号基于评分阈值与买入共振信号数判定（短线≥60分且共振≥2；中长线≥70分；增强版≥65分）。止损止盈计算方式因策略而异：
@@ -327,15 +382,31 @@
 <script>
 let lastResults = [];
 
+const UNIVERSE_HINTS = {
+  hs300:    { cls: 'hint-long',  text: '💡 推荐长线 / 增强版',  tip: '大盘蓝筹波动小，趋势策略更稳健' },
+  zz500:    { cls: 'hint-all',   text: '💡 长线 / 短线均适用',  tip: '中盘弹性居中，三种策略均可' },
+  gem_star: { cls: 'hint-short', text: '💡 推荐短线',           tip: '高波动成长股，动量信号更灵敏；增强版基本面评分可能偏低' }
+};
+
+function updateUniverseHint(){
+  const u = document.getElementById('sel-universe').value;
+  const h = UNIVERSE_HINTS[u] || UNIVERSE_HINTS.hs300;
+  const el = document.getElementById('universe-hint');
+  el.className = 'universe-hint ' + h.cls;
+  el.textContent = h.text;
+  el.title = h.tip;
+}
+
 async function runSelector(){
   const type=document.getElementById('sel-type').value;
+  const universe=document.getElementById('sel-universe').value;
   const top_n=parseInt(document.getElementById('top-n').value)||5;
   document.getElementById('status').textContent='⏳ 选股中，请稍候…';
   document.getElementById('results-table').style.display='none';
   document.getElementById('report-card').style.display='none';
   lastResults=[];
 
-  const r=await fetch('/api/selector/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type,top_n})});
+  const r=await fetch('/api/selector/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type,universe,top_n})});
   const d=await r.json();
   if(d.status!=='success'){document.getElementById('status').textContent='❌ '+d.message;return;}
 
@@ -352,12 +423,12 @@ async function runSelector(){
       <td><span class="badge ${s.recommend?'badge-buy':'badge-nobuy'}">${s.recommend?'▲ 买入':'— 观望'}</span></td>
       <td>${s.stop_loss??'-'}</td>
       <td>${s.take_profit??'-'}</td>
-      <td><button class="ai-btn" id="ai-btn-${i}" onclick="toggleStockAnalyze(${i})">🤖 AI研报</button></td>
+      <td><button class="ai-btn" id="ai-btn-${i}" onclick="toggleStockAnalyze(${i})">📰 情绪分析</button></td>
     </tr>
     <tr class="llm-row" id="llm-row-${i}" style="display:none">
       <td colspan="9">
         <div class="llm-row-inner">
-          <div class="llm-report" id="llm-report-${i}"></div>
+          <div class="sentiment-card" id="llm-report-${i}"></div>
         </div>
       </td>
     </tr>`).join('');
@@ -367,7 +438,8 @@ async function runSelector(){
 async function getReport(){
   if(!lastResults.length){alert('请先运行选股');return;}
   const type=document.getElementById('sel-type').value;
-  const r=await fetch('/api/selector/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type,stocks:lastResults})});
+  const universe=document.getElementById('sel-universe').value;
+  const r=await fetch('/api/selector/report',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type,universe,stocks:lastResults})});
   const d=await r.json();
   if(d.status!=='success'){alert(d.message);return;}
   document.getElementById('report').textContent=d.report;
@@ -376,51 +448,150 @@ async function getReport(){
 
 async function toggleStockAnalyze(i){
   const row=document.getElementById('llm-row-'+i);
-  const reportDiv=document.getElementById('llm-report-'+i);
+  const cardDiv=document.getElementById('llm-report-'+i);
   const btn=document.getElementById('ai-btn-'+i);
 
-  // 若已有内容则切换折叠/展开
-  if(reportDiv.dataset.done==='1'){
+  // 已有结果则切换折叠/展开
+  if(cardDiv.dataset.done==='1'){
     const visible=row.style.display!=='none';
     row.style.display=visible?'none':'';
-    btn.textContent=visible?'🤖 AI研报':'✖ 收起';
+    btn.textContent=visible?'📰 情绪分析':'✖ 收起';
     return;
   }
 
-  // 展开并开始流式分析
+  // 展开并请求情绪分析
   row.style.display='';
   btn.disabled=true; btn.textContent='⏳ 分析中…';
-  reportDiv.innerHTML='<p style="color:#a08ab8;font-size:.83rem">⏳ 正在生成研读报告…</p>';
+  cardDiv.innerHTML='<p style="color:#a08ab8;font-size:.83rem">⏳ 正在抓取新闻并分析情绪…</p>';
   row.scrollIntoView({behavior:'smooth',block:'nearest'});
 
   const stock=lastResults[i];
-  let accumulated='';
+  const type=document.getElementById('sel-type').value;
   try{
-    const r=await fetch('/api/selector/gpt-analyze',{
+    const r=await fetch('/api/selector/sentiment',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({stocks:[stock],stream:true})
+      body:JSON.stringify({stock,type})
     });
-    if(!r.ok){
-      reportDiv.innerHTML='<p style="color:#c05050">❌ 请求失败: '+r.status+'</p>';
+    const d=await r.json();
+    if(d.status!=='success'){
+      cardDiv.innerHTML=`<p style="color:#c05050">❌ ${d.message||'请求失败'}</p>`;
       return;
     }
-    const reader=r.body.getReader();
-    const decoder=new TextDecoder();
-    reportDiv.innerHTML='';
-    while(true){
-      const {done,value}=await reader.read();
-      if(done) break;
-      accumulated+=decoder.decode(value,{stream:true});
-      reportDiv.innerHTML=marked.parse(accumulated);
-      reportDiv.scrollTop=reportDiv.scrollHeight;
-    }
-    reportDiv.innerHTML=marked.parse(accumulated);
-    reportDiv.dataset.done='1';
+
+    // 渲染情绪卡片
+    const sentMap={'正面':'pos','负面':'neg','中性':'neu'};
+    const arrowMap={'正面':'▲','负面':'▼','中性':'■'};
+    const cls=sentMap[d.sentiment]||'neu';
+    const arrow=arrowMap[d.sentiment]||'■';
+    const scoreBar=d.score>=0
+      ? `<span style="color:#1e7e34">+${d.score.toFixed(2)}</span>`
+      : `<span style="color:#9e2a2a">${d.score.toFixed(2)}</span>`;
+
+    const articleRows=(d.articles||[]).map(a=>{
+      const ac=sentMap[a.sentiment]||'neu';
+      const ar=arrowMap[a.sentiment]||'■';
+      return `<li>
+        <span class="news-arrow ${ac}">${ar}</span>
+        <div>
+          <div>${a.title||''}</div>
+          <div class="news-meta">${a.published||''}　${a.reason||''}</div>
+        </div>
+      </li>`;
+    }).join('');
+
+    const ns=d.news_summary||{};
+    const newsSummaryText = d.news_summary_text||'';
+    const techAlignment   = d.tech_alignment||'';
+    const conclusion      = d.conclusion||'';
+    const technicalAnalysis = d.technical_analysis||'';
+    const fundFlowAnalysis  = d.fund_flow_analysis||'';
+    const industryLogicStatus = d.industry_logic_status||'';
+    const industryLogicReason = d.industry_logic_reason||'';
+    const tradingLogicStatus  = d.trading_logic_status||'';
+    const tradingLogicReason  = d.trading_logic_reason||'';
+    const scenarioStrong = d.scenario_strong||'';
+    const scenarioMid    = d.scenario_mid||'';
+    const scenarioWeak   = d.scenario_weak||'';
+    const impactScore    = d.impact_score||'';
+    const confidence     = d.confidence||'';
+    const confidenceReason = d.confidence_reason||'';
+    const oneLineConclusion = d.one_line_conclusion||'';
+
+    cardDiv.innerHTML=`
+      <div class="sentiment-header">
+        <span class="sentiment-badge sentiment-${cls}">${arrow} ${d.sentiment}</span>
+        <span class="sentiment-score">综合评分 ${scoreBar}</span>
+      </div>
+
+      ${conclusion?`<div class="analysis-block conclusion-block">
+        <div class="analysis-label">📌 综合结论</div>
+        <div class="analysis-text">${conclusion}</div>
+      </div>`:''}
+
+      ${oneLineConclusion?`<div class="analysis-block">
+        <div class="analysis-label">🧾 一句话结论</div>
+        <div class="analysis-text">${oneLineConclusion}</div>
+      </div>`:''}
+
+      ${newsSummaryText?`<div class="analysis-block">
+        <div class="analysis-label">📰 新闻主题</div>
+        <div class="analysis-text">${newsSummaryText}</div>
+      </div>`:''}
+
+      ${technicalAnalysis?`<div class="analysis-block">
+        <div class="analysis-label">📈 技术面分析</div>
+        <div class="analysis-text">${technicalAnalysis}</div>
+      </div>`:''}
+
+      ${fundFlowAnalysis?`<div class="analysis-block">
+        <div class="analysis-label">💵 资金面分析</div>
+        <div class="analysis-text">${fundFlowAnalysis}</div>
+      </div>`:''}
+
+      ${techAlignment?`<div class="analysis-block">
+        <div class="analysis-label">📊 技术面配合度</div>
+        <div class="analysis-text">${techAlignment}</div>
+      </div>`:''}
+
+      ${(industryLogicStatus||tradingLogicStatus)?`<div class="analysis-block">
+        <div class="analysis-label">🧠 双逻辑判断</div>
+        <div class="analysis-text">
+          产业逻辑：${industryLogicStatus||'数据不足'} ${industryLogicReason?`（${industryLogicReason}）`:''}<br/>
+          交易逻辑：${tradingLogicStatus||'数据不足'} ${tradingLogicReason?`（${tradingLogicReason}）`:''}
+        </div>
+      </div>`:''}
+
+      ${(scenarioStrong||scenarioMid||scenarioWeak)?`<div class="analysis-block">
+        <div class="analysis-label">🎯 三情景动作</div>
+        <div class="analysis-text">
+          强情景：${scenarioStrong||'数据不足'}<br/>
+          中情景：${scenarioMid||'数据不足'}<br/>
+          弱情景：${scenarioWeak||'数据不足'}
+        </div>
+      </div>`:''}
+
+      ${(impactScore||confidence)?`<div class="analysis-block">
+        <div class="analysis-label">📍 影响评分与置信度</div>
+        <div class="analysis-text">
+          影响评分：${impactScore||'数据不足'}<br/>
+          置信度：${confidence||'数据不足'} ${confidenceReason?`（${confidenceReason}）`:''}
+        </div>
+      </div>`:''}
+
+      <div class="news-summary">
+        <span class="ns-pos">▲ 正面 ${ns['正面']||0} 条</span>
+        <span class="ns-neg">▼ 负面 ${ns['负面']||0} 条</span>
+        <span class="ns-neu">■ 中性 ${ns['中性']||0} 条</span>
+        <span class="ns-avg">新闻均分 ${d.news_score>=0?'+':''}${(d.news_score||0).toFixed(2)}</span>
+      </div>
+      ${articleRows?`<ul class="news-list">${articleRows}</ul>`:'<p style="color:#a08ab8;font-size:.8rem">暂无新闻数据</p>'}
+    `;
+    cardDiv.dataset.done='1';
     btn.textContent='✖ 收起';
   }catch(e){
-    reportDiv.innerHTML='<p style="color:#c05050">❌ '+e.message+'</p>';
-    btn.textContent='🤖 AI研报';
+    cardDiv.innerHTML=`<p style="color:#c05050">❌ ${e.message}</p>`;
+    btn.textContent='📰 情绪分析';
   }finally{
     btn.disabled=false;
   }

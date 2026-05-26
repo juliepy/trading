@@ -33,20 +33,45 @@ from short_term_indicators import ShortTermIndicators
 class ShortTermSelector:
     """短线选股引擎"""
     
-    def __init__(self):
+    def __init__(self, index_code: str = None):
         self.ds = SmartDataSource()
         self.cache = StockCache()
         self.indicators = ShortTermIndicators()
-        
+        self._index_code = index_code
+
+    def _get_gem_star_stocks(self, ak) -> List[str]:
+        """获取创业板（399006）+ 科创50（000688）成分股"""
+        codes: set = set()
+        for symbol, prefix, label in [("399006", "3", "创业板"), ("000688", "688", "科创50")]:
+            try:
+                print(f"获取{label}成分股（东方财富）...", flush=True)
+                df = ak.index_stock_cons(symbol=symbol)
+                for c in df['品种代码'].astype(str).str.zfill(6).tolist():
+                    if c.startswith(prefix):
+                        codes.add(c)
+                print(f"✅ {label} 获取成功", flush=True)
+            except Exception as e:
+                print(f"⚠️ {label}成分股失败: {e}", flush=True)
+        result = sorted(codes)
+        print(f"✅ 创业板+科创板共 {len(result)} 只", flush=True)
+        return result
+
     def get_index_stocks(self) -> List[str]:
-        """从沪深300成分股中获取扫描范围，过滤创业板和科创板"""
+        """获取扫描范围成分股"""
         import akshare as ak
         import sys, os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'data'))
-        try:
-            from config import SCAN_INDEX
-        except Exception:
-            SCAN_INDEX = "000300"
+
+        index_code = self._index_code
+        if not index_code:
+            try:
+                from config import SCAN_INDEX
+            except Exception:
+                SCAN_INDEX = "000300"
+            index_code = SCAN_INDEX
+
+        if index_code == 'gem_star':
+            return self._get_gem_star_stocks(ak)
 
         def _filter(codes):
             return [
@@ -56,8 +81,8 @@ class ShortTermSelector:
 
         # 方案1: 东方财富成分股接口（稳定，无需访问中证官网）
         try:
-            print(f"获取{SCAN_INDEX}成分股（东方财富）...", flush=True)
-            df = ak.index_stock_cons(symbol=SCAN_INDEX)
+            print(f"获取{index_code}成分股（东方财富）...", flush=True)
+            df = ak.index_stock_cons(symbol=index_code)
             codes = df['品种代码'].astype(str).str.zfill(6).tolist()
             result = _filter(codes)
             print(f"✅ 获取到 {len(result)} 只成分股", flush=True)
@@ -67,8 +92,8 @@ class ShortTermSelector:
 
         # 方案2: 中证指数官网（原方案，可能超时）
         try:
-            print(f"获取{SCAN_INDEX}成分股（中证官网）...", flush=True)
-            df = ak.index_stock_cons_weight_csindex(symbol=SCAN_INDEX)
+            print(f"获取{index_code}成分股（中证官网）...", flush=True)
+            df = ak.index_stock_cons_weight_csindex(symbol=index_code)
             codes = df['成分券代码'].astype(str).str.zfill(6).tolist()
             result = _filter(codes)
             print(f"✅ 获取到 {len(result)} 只成分股", flush=True)
